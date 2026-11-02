@@ -1,0 +1,14 @@
+/boot/data
+/boot/library
+/boot/software
+/data
+/model
+/output
+/old_files
+/report
+*.Rproj
+.RData
+.Rhistory
+.Rproj.user
+.Ruserdata
+worksheet.R
