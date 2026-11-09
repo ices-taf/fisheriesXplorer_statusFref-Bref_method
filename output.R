@@ -8,6 +8,35 @@ mkdir("output")
 dir.create("output/regions", recursive = TRUE, showWarnings = FALSE)
 dir.create("output/reference_points", recursive = TRUE, showWarnings = FALSE)
 
+# Optional regional guild decisions. Only FisheriesGuild contains approved values.
+guild_path <- "config/manual_fisheries_guilds.csv"
+guild_overrides <- NULL
+if (file.exists(guild_path)) {
+  guild_overrides <- utils::read.csv(guild_path, colClasses = "character",
+                                    stringsAsFactors = FALSE)
+  keys <- c("EcoregionCode", "StockKeyLabel")
+  required_cols <- c(keys, "FisheriesGuild")
+  if (!all(required_cols %in% names(guild_overrides))) {
+    stop("Missing columns in ", guild_path, ": ",
+         paste(setdiff(required_cols, names(guild_overrides)), collapse = ", "))
+  }
+  guild_overrides <- guild_overrides |>
+    dplyr::transmute(EcoregionCode = trimws(EcoregionCode),
+                     StockKeyLabel = trimws(StockKeyLabel),
+                     FisheriesGuild = tolower(trimws(FisheriesGuild)))
+  codes <- vapply(ecoregions, get_ecoregion_acronym, character(1))
+  if (any(!guild_overrides$EcoregionCode %in% codes) ||
+      any(is.na(guild_overrides$StockKeyLabel) | !nzchar(guild_overrides$StockKeyLabel))) {
+    stop("Unknown ecoregion code or empty stock key in ", guild_path)
+  }
+  if (anyDuplicated(guild_overrides[keys])) stop("Duplicate stock-ecoregion key in ", guild_path)
+  guild_overrides <- dplyr::filter(guild_overrides, !is.na(FisheriesGuild), FisheriesGuild != "")
+  allowed_guilds <- c("benthic", "demersal", "elasmobranch", "pelagic", "shellfish")
+  invalid <- setdiff(guild_overrides$FisheriesGuild, allowed_guilds)
+  if (length(invalid)) stop("Unrecognised fisheries guild in ", guild_path, ": ",
+                            paste(invalid, collapse = ", "))
+}
+
 results <- vector("list", length(ecoregions))
 failures <- list()
 for (i in seq_along(ecoregions)) {
@@ -51,6 +80,17 @@ for (i in seq_along(ecoregions)) {
         },
         .groups = "drop"
       )
+
+    if (!is.null(guild_overrides)) {
+      regional <- dplyr::filter(guild_overrides, EcoregionCode == code)
+      idx <- match(universe$StockKeyLabel, regional$StockKeyLabel)
+      fill <- !universe$GuildConflictInRegion &
+        tolower(universe$FisheriesGuild) == "unknown" & !is.na(idx)
+      universe$FisheriesGuild[fill] <- regional$FisheriesGuild[idx[fill]]
+      missing_stocks <- setdiff(regional$StockKeyLabel, universe$StockKeyLabel)
+      if (length(missing_stocks)) warning("Guild override stocks absent in ", code, ": ",
+                                          paste(missing_stocks, collapse = ", "))
+    }
 
     region_guild_conflicts <- universe |>
       dplyr::filter(GuildConflictInRegion) |>
@@ -259,6 +299,10 @@ regional_guild_variation <- by_ecoregion |>
   dplyr::summarise(
     n_guilds = dplyr::n_distinct(FisheriesGuild),
     guilds_by_ecoregion = paste(
+      paste(Ecoregion, FisheriesGuild, sep = ": "),
+      collapse = "; "
+    ),
+    guilds_reported_by_ecoregion = paste(
       paste(Ecoregion, FisheriesGuild_reported, sep = ": "),
       collapse = "; "
     ),
