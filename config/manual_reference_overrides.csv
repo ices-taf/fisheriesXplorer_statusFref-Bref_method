@@ -2,5 +2,4 @@ StockKeyLabel,AssessmentKey,reference_field,reference_name,Indicator,source_issu
 rjn.27.8c,19116,CustomRefPointValue3,Fmsy proxy,Fref,Approved manual fishing-pressure mapping (no numeric SAG chart selection),,3
 sol.27.8c9a,19817,CustomRefPointValue1,F_{MSY proxy},Fref,Approved manual fishing-pressure mapping (no numeric SAG chart selection),,3
 her.27.1-24a514a,25912,Fmanagement,Fmanagement,Fref,Named SAG Fmgt setting maps to standard Fmanagement field; confirm source measurement,Fmgt,3
-dab.27.3a4,19480,CustomRefPointValue3,F_{MSY proxy},Fref,Approved from unassigned_reference_points.csv,,3
 bzq.27.2425,22345,CustomRefPointValue1,FMSY proxy,Fref,Approved from unassigned_reference_points.csv | missing data from Custom2,,3

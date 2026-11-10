@@ -1033,10 +1033,12 @@ plot_GES_pies_plotly_v2 <- function(
   }
 
   annotations[[length(annotations) + 1L]] <- list(
-    x = 1, y = -0.04,
+    x = 1, y = 0, xshift = 108, yshift = -15,
     xref = "paper", yref = "paper",
     xanchor = "right", yanchor = "top", showarrow = FALSE,
+    align = "right",
     text = paste0(
+      "Ecoregion catch/landings/discard shares estimated from RDBES<br>",
       "ICES Stock Assessment Database, ",
       format(Sys.Date(), "%d-%b-%y"), ". ICES, Copenhagen"
     ),
@@ -1485,9 +1487,12 @@ plot_kobe_app_plotly_v3 <- function(
   layout_annotations <- stock_annotations
 
   layout_annotations[[length(layout_annotations) + 1L]] <- list(
-    x = 1, y = -0.14, xref = "paper", yref = "paper",
+    x = 1, y = 0, xref = "paper", yref = "paper",
+    xshift = if (legend_outside) 268 else 18, yshift = -62,
     xanchor = "right", yanchor = "top", showarrow = FALSE,
+    align = "right",
     text = paste0(
+      "Ecoregion catch/landings/discard shares estimated from RDBES<br>",
       "ICES Stock Assessment Database, ",
       format(Sys.Date(), "%d-%b-%y"), ". ICES, Copenhagen"
     ),
@@ -1529,7 +1534,7 @@ plot_kobe_app_plotly_v3 <- function(
     hovermode = "closest",
     margin = list(
       l = 90, r = if (legend_outside) 280 else 30,
-      t = 30, b = 70
+      t = 30, b = 110
     ),
     annotations = layout_annotations
   )
@@ -2009,7 +2014,7 @@ plot_discard_trends_app_plotly_v3 <- function(
       tickfont = list(size = tick_size)
     ),
     legend = list(title = list(text = "<b>Fisheries guild:</b>")),
-    margin = list(l = 75, r = 30, t = 65, b = 115),
+    margin = list(l = 75, r = 30, t = 65, b = 125),
     annotations = list(
       list(
         text = region_title, x = 0.01, y = 1.08,
@@ -2018,11 +2023,13 @@ plot_discard_trends_app_plotly_v3 <- function(
         font = list(size = title_size, color = "black")
       ),
       list(
-        text = paste0("ICES Stock Assessment Database, ",
-                      format(Sys.Date(), "%d-%b-%y"), ". ICES, Copenhagen<br>",
-                      "Ecoregion estimates calculated from recent spatial shares derived from RDBES"),
-        x = 1, y = -0.24, xref = "paper", yref = "paper",
+        text = paste0("Ecoregion catch/landings/discard shares estimated from RDBES<br>",
+                      "ICES Stock Assessment Database, ",
+                format(Sys.Date(), "%d-%b-%y"), ". ICES, Copenhagen"),
+        x = 1, y = 0, xshift = 18, yshift = -75,
+        xref = "paper", yref = "paper",
         xanchor = "right", yanchor = "top", showarrow = FALSE,
+        align = "right",
         font = list(size = caption_size)
       )
     )

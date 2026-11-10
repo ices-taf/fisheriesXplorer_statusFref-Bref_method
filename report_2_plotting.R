@@ -81,7 +81,8 @@ can_plot <- requireNamespace("plotly", quietly = TRUE) &&
   exists("plot_status_prop_pies_plotly_v2", mode = "function")
 export_dir <- "report/html_plots"
 dir.create(export_dir, recursive = TRUE, showWarnings = FALSE)
-kobe_guilds <- c("benthic", "demersal", "elasmobranch", "pelagic", "shellfish")
+kobe_guilds <- c("benthic", "demersal", "elasmobranch", "pelagic", "shellfish",
+                 "all_stocks")
 expected_plot_index <- expand.grid(
   plot_type = c("stock_summary", "ges", "discards"),
   ecoregion_id = vapply(ecoregions, get_ecoregion_acronym, character(1)),
@@ -227,11 +228,16 @@ tryCatch(for (region in ecoregions) {
   })
   for (guild in kobe_guilds) {
     save_plot_export("kobe", code, function() {
-      guild_stocks <- filter(regional_current, FisheriesGuild %in% guild)
+      plot_guild <- if (identical(guild, "all_stocks")) "All" else guild
+      guild_stocks <- if (identical(plot_guild, "All")) {
+        regional_current
+      } else {
+        filter(regional_current, FisheriesGuild %in% plot_guild)
+      }
       if (!nrow(guild_stocks)) {
         stop_plot_no_data(paste0("No stocks for fisheries guild: ", guild))
       }
-      plot_kobe_app_plotly_v3(regional_current, guild = guild)
+      plot_kobe_app_plotly_v3(regional_current, guild = plot_guild)
     }, guild_id = guild)
   }
 }, error = function(error) {
