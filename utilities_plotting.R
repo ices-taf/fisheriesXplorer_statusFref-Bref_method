@@ -1142,7 +1142,7 @@ plot_kobe_app_plotly_v3 <- function(
     return_data = FALSE,
     size_by_catches = TRUE,
     min_point_size = 8,
-    max_point_size = 25,
+    max_point_size = 27,
     n_size_legend = 4,
     unknown_row_px = 26,
     max_unknown_stocks = 12
@@ -1249,8 +1249,8 @@ plot_kobe_app_plotly_v3 <- function(
     TRUE ~ "No catch/landing data"
   )
 
-  # 5. ONE size scale for both panels (including unknown-status stocks).
-  size_values <- df$CatchSizeValue[is.finite(df$CatchSizeValue)]
+  # 5. Size scale and legend use only stocks with valid Kobe coordinates.
+  size_values <- df$CatchSizeValue[known & is.finite(df$CatchSizeValue)]
   c_min <- if (length(size_values)) min(size_values) else NA_real_
   c_max <- if (length(size_values)) max(size_values) else NA_real_
 
@@ -1310,16 +1310,42 @@ plot_kobe_app_plotly_v3 <- function(
   format_ratio <- function(v) {
     ifelse(is.finite(v) & v >= 0, sprintf("%.2f", v), "NA")
   }
+  reference_names <- function(column) {
+    if (!column %in% names(df)) return(rep("Reference name unavailable", nrow(df)))
+    values <- as.character(df[[column]])
+    values[is.na(values) | !nzchar(trimws(values))] <- "Reference name unavailable"
+    values
+  }
+  fref_names <- reference_names("Fref_name")
+  bref_names <- reference_names("Bref_name")
 
   df$hover_text <- paste0(
     "<b>", html_safe(df$StockKeyLabel), "</b><br>",
-    "F/Fref: ", format_ratio(df$F_FMSY), "<br>",
-    "B/Bref: ", format_ratio(df$SSB_MSYBtrigger), "<br>",
+    "F/Fref: ", format_ratio(df$F_FMSY), " (", html_safe(fref_names), ")<br>",
+    "B/Bref: ", format_ratio(df$SSB_MSYBtrigger), " (", html_safe(bref_names), ")<br>",
     "Kobe status: ", df$KobeStatus, "<br>",
     ifelse(df$KobeStatus == "Unknown", df$UnknownReason, df$KobeDescription),
     "<br>", df$CatchSizeSource, ": ", format_quantity(df$CatchSizeValue),
     " t"
   )
+  df$hover_payload <- vapply(seq_len(nrow(df)), function(index) {
+    jsonlite::toJSON(
+      list(
+        stock = as.character(df$StockKeyLabel[[index]]),
+        guild = as.character(df$FisheriesGuild[[index]]),
+        f_ratio = if (valid_f[[index]]) df$F_FMSY[[index]] else NA_real_,
+        b_ratio = if (valid_b[[index]]) df$SSB_MSYBtrigger[[index]] else NA_real_,
+        fref_name = fref_names[[index]],
+        bref_name = bref_names[[index]],
+        status = df$KobeStatus[[index]],
+        description = if (known[[index]]) df$KobeDescription[[index]] else df$UnknownReason[[index]],
+        reference_type = df$ProxyFlag[[index]],
+        catch_t = df$CatchSizeValue[[index]],
+        catch_source = df$CatchSizeSource[[index]]
+      ),
+      auto_unbox = TRUE, na = "null", null = "null", digits = 12
+    ) |> as.character()
+  }, character(1))
   plot_df <- df[known, , drop = FALSE]
 
   p <- plotly::plot_ly()
@@ -1346,8 +1372,8 @@ plot_kobe_app_plotly_v3 <- function(
           symbol = symbol, size = sub$point_size,
           color = col, line = marker_line
         ),
-        customdata = ~hover_text,
-        hovertemplate = "%{customdata}<extra></extra>",
+        customdata = ~hover_payload,
+        hoverinfo = "none",
         showlegend = FALSE, opacity = opacity, inherit = FALSE
       )
 
@@ -1508,7 +1534,7 @@ plot_kobe_app_plotly_v3 <- function(
     annotations = layout_annotations
   )
 
-  plotly::config(
+  p <- plotly::config(
     p,
     responsive = TRUE,
     toImageButtonOptions = list(
@@ -1516,6 +1542,45 @@ plot_kobe_app_plotly_v3 <- function(
       format = "png", scale = 3
     )
   )
+
+  renderer <- r"---(
+function(el, x) {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'kobe-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.style.display = 'none';
+  tooltip.innerHTML = '<style>' +
+    '.kobe-tooltip{position:fixed;z-index:2147483000;width:400px;max-width:calc(100vw - 20px);max-height:calc(100vh - 20px);overflow-y:auto;box-sizing:border-box;padding:15px 16px;background:#fff;color:#243746;border:1px solid #d8e2ea;border-radius:8px;box-shadow:0 10px 32px rgba(15,33,45,.22);font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;pointer-events:auto;}' +
+    '.kobe-tooltip *{box-sizing:border-box;}' +
+    '.kobe-tooltip .kb-title{font-size:16px;font-weight:700;overflow-wrap:anywhere;}' +
+    '.kobe-tooltip .kb-muted{font-size:11px;color:#697b87;overflow-wrap:anywhere;}' +
+    '.kobe-tooltip .kb-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:12px 0;}' +
+    '.kobe-tooltip .kb-value{font-size:20px;font-weight:700;overflow-wrap:anywhere;}' +
+    '.kobe-tooltip .kb-ref{font-size:12px;font-weight:400;color:#697b87;overflow-wrap:anywhere;}' +
+    '.kobe-tooltip .kb-status{padding:10px 0;border-top:1px solid #e4eaf0;border-bottom:1px solid #e4eaf0;margin-bottom:10px;overflow-wrap:anywhere;}' +
+    '</style>';
+  const safe = value => String(value == null ? '' : value).replace(/[&<>"']/g,
+    character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
+  const isNumber = value => typeof value === 'number' && Number.isFinite(value);
+  const ratio = value => isNumber(value) && value >= 0 ? value.toFixed(2) : 'Not available';
+  const quantity = value => isNumber(value) ? value.toLocaleString('en-GB', {
+    maximumFractionDigits:0
+  }) + ' t' : 'Not available';
+  const build = function(data) {
+    return '<div class="kb-title">' + safe(data.stock) + '</div>' +
+      '<div class="kb-muted">' + safe(data.guild) + ' | ' + safe(data.reference_type) + '</div>' +
+      '<div class="kb-grid"><div><div class="kb-muted">F/Fref</div>' +
+      '<div class="kb-value">' + ratio(data.f_ratio) + ' <span class="kb-ref">(' + safe(data.fref_name) + ')</span></div></div>' +
+      '<div><div class="kb-muted">B/Bref</div><div class="kb-value">' + ratio(data.b_ratio) +
+      ' <span class="kb-ref">(' + safe(data.bref_name) + ')</span></div></div></div>' +
+      '<div class="kb-status"><b>Kobe status: ' + safe(data.status) + '</b>' +
+      '<div class="kb-muted">' + safe(data.description) + '</div></div>' +
+      '<div class="kb-muted">' + safe(data.catch_source) + '</div><b>' + quantity(data.catch_t) + '</b>';
+  };
+  return {tooltip, build};
+}
+)---"
+  add_html_hover(p, renderer)
 }
 
 
