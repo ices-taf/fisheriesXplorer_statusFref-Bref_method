@@ -25,9 +25,9 @@ output.R                       -> output/regions/stocks_<code>.rds
                                   output/coverage_by_ecoregion.csv
                                   output/conflicting_stocks.csv
 
-report.R                       -> report/reference_point_summary.md
+report_1_summary.R             -> report/reference_point_summary.md
                                   report/stock_status_coverage.csv
-                                  report/status_pies/status_pies_<code>.html (optional)
+report_2_plotting.R             -> report/status_pies/status_pies_<code>.html (optional)
 ```
 
 The **boot** scripts are executed by `taf.boot()` in their own `boot/data/<script_name>/` working directories, exactly as in your repo. Each script now retrieves all configured ecoregions (SAG and settings: one request per region; SID: one active-year download, then region splitting). They write the *same named files* your `DATA.bib` expects, but with a `TAF_Ecoregion` column to separate stock/assessment records. `data.R` reads those files and removes `TAF_Ecoregion` before calling your existing `format_sag()`. No subsequent stage performs API requests.
@@ -37,7 +37,7 @@ The **boot** scripts are executed by `taf.boot()` in their own `boot/data/<scrip
 Extract this patch over a copy/branch of the existing repo, retaining the relative paths. The patch includes:
 
 - `boot/getSAG.R`, `boot/getSAGsettings.R`, `boot/getSID.R`, `boot/DATA.bib`
-- `all_regions_config.R`, `data.R`, `model.R`, `output.R`, `report.R`
+- `all_regions_config.R`, `data.R`, `model.R`, `output.R`, `report.R`, `report_1_summary.R`, `report_2_plotting.R`
 - `config/manual_reference_overrides.csv` and `run_all_ecoregions.R`
 
 Install dependencies already used by your repository (`icesTAF`, `dplyr`, `tidyr`, `tibble`, `jsonlite`); optionally `plotly` and `htmlwidgets` for the report HTML. `utilities.R` in your repository already provides `audit_sag_reference_points`, `make_sag_refpoint_policy`, `read_sag_review_policy_v3`, `add_proxyRefPoints_v3`, `stockstatus_CLD_current_proxy`, and the provenance helper. `utilities_plotting.R` is unchanged.
@@ -49,6 +49,13 @@ source("run_all_ecoregions.R")
 ```
 
 Alternatively run `taf.boot(force = TRUE)` and then source `data.R`, `model.R`, `output.R`, and `report.R` in order. To reuse boot data without fetching anew, start at `source("data.R")`. The default SID active year is **2026**; set `ICES_ASSESSMENT_YEAR` in the environment before running boot to override. If you change the year, review the year metadata in `boot/DATA.bib` accordingly.
+
+`report.R` runs both report stages. To run either stage independently from the repository root using existing output data:
+
+```r
+source("report_1_summary.R")
+source("report_2_plotting.R")
+```
 
 ## Reference-point policy
 

@@ -394,14 +394,15 @@ plot_status_prop_pies_plotly_v2 <- function(
   p <- plotly::layout(
     p,
     height = plot_height,
+    showlegend = FALSE,
     paper_bgcolor = "white",
     plot_bgcolor = "white",
-    legend = list(
-      title = list(text = "Status"),
-      x = 1.01, y = 1,
-      xanchor = "left", yanchor = "top",
-      bgcolor = "rgba(255,255,255,0.85)"
-    ),
+    # legend = list(
+    #   title = list(text = "Status"),
+    #   x = 1.01, y = 1,
+    #   xanchor = "left", yanchor = "top",
+    #   bgcolor = "rgba(255,255,255,0.85)"
+    # ),
     margin = list(l = 95, r = 115, t = 65, b = 85),
     xaxis = list(visible = FALSE, range = c(0, 1), fixedrange = TRUE),
     yaxis = list(visible = FALSE, range = c(0, 1), fixedrange = TRUE),
@@ -833,11 +834,11 @@ plot_GES_pies_plotly_v2 <- function(
     p,
     height = plot_height,
     paper_bgcolor = "white", plot_bgcolor = "white",
-    legend = list(
-      title = list(text = "Status"),
-      x = 1.01, y = 1, xanchor = "left", yanchor = "top",
-      bgcolor = "rgba(255,255,255,0.90)"
-    ),
+    # legend = list(
+    #   title = list(text = "Status"),
+    #   x = 1.01, y = 1, xanchor = "left", yanchor = "top",
+    #   bgcolor = "rgba(255,255,255,0.90)"
+    # ),
     margin = list(l = 100, r = 120, t = 65, b = 75),
     xaxis = list(visible = FALSE, range = c(0, 1), fixedrange = TRUE),
     yaxis = list(visible = FALSE, range = c(0, 1), fixedrange = TRUE),
