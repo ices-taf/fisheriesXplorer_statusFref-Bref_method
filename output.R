@@ -156,8 +156,11 @@ for (i in seq_along(ecoregions)) {
         dplyr::select(current, -dplyr::any_of("FisheriesGuild")),
         by = "StockKeyLabel"
       )
-    if (!"Status" %in% names(current)) current$Status <- NA_character_
-    current$Status[is.na(current$Status)] <- "GREY"
+    current <- current |>
+      dplyr::mutate(
+        FStatus = dplyr::coalesce(FStatus, "GREY"),
+        BStatus = dplyr::coalesce(BStatus, "GREY")
+      )
     current <- attach_refpoint_provenance_v3(current, res$current_v3)
     current$Ecoregion <- region
     current$EcoregionCode <- code
