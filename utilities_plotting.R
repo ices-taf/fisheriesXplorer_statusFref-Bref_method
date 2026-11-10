@@ -97,6 +97,13 @@ ecoregion_exclusion_reason <- function(usable, share_unavailable = FALSE) {
   reason
 }
 
+stop_plot_no_data <- function(message) {
+  stop(structure(
+    list(message = message, call = NULL),
+    class = c("plot_no_data", "error", "condition")
+  ))
+}
+
 prepare_precautionary_status_pies <- function(df) {
 
   required <- c(
@@ -129,7 +136,7 @@ prepare_precautionary_status_pies <- function(df) {
     dplyr::distinct()
 
   if (nrow(stock_df) == 0L) {
-    stop("No stocks in the supplied data.")
+    stop_plot_no_data("No stocks in the supplied data.")
   }
 
   # A stock should contribute once per indicator. Do not silently pick
@@ -288,24 +295,21 @@ plot_status_prop_pies_plotly_v2 <- function(
     sort(setdiff(present_guilds, desired_guilds))
   )
 
-  format_stocks <- function(ids) {
-    shown <- utils::head(ids, max_hover_stocks)
-    out <- paste(shown, collapse = "<br>")
-    n_more <- length(ids) - length(shown)
-    if (n_more > 0L) {
-      out <- paste0(out, "<br>... and ", n_more, " more")
-    }
-    out
-  }
-
-  counts_plot$hover_text <- vapply(seq_len(nrow(counts_plot)), function(i) {
-    paste0(
-      "<b>", guild_display_name(counts_plot$GuildPlot[[i]]), " — ",
-      headers[[counts_plot$Indicator[[i]]]], "</b><br>",
-      "Status: ", counts_plot$Colour[[i]], "<br>",
-      "Stocks: ", counts_plot$COUNT[[i]], " / ", counts_plot$total_stocks[[i]],
-      " (", sprintf("%.1f", counts_plot$pct[[i]]), "%)<br><br>",
-      "<b>Stocks</b><br>", format_stocks(counts_plot$stock_ids[[i]])
+  counts_plot$hover_payload <- vapply(seq_len(nrow(counts_plot)), function(index) {
+    stock_ids <- counts_plot$stock_ids[[index]]
+    shown <- utils::head(stock_ids, max_hover_stocks)
+    jsonlite::toJSON(
+      list(
+        guild = guild_display_name(counts_plot$GuildPlot[[index]]),
+        indicator = headers[[counts_plot$Indicator[[index]]]],
+        status = counts_plot$Colour[[index]],
+        n_stocks = counts_plot$COUNT[[index]],
+        total_stocks = counts_plot$total_stocks[[index]],
+        pct = counts_plot$pct[[index]],
+        stocks = as.list(shown),
+        additional_stocks = length(stock_ids) - length(shown)
+      ),
+      auto_unbox = TRUE, na = "null", null = "null", digits = 12
     )
   }, character(1))
 
@@ -393,8 +397,8 @@ plot_status_prop_pies_plotly_v2 <- function(
         labels = as.character(sub$Colour),
         values = as.numeric(sub$COUNT),
         text = as.character(sub$COUNT),
-        customdata = as.character(sub$hover_text),
-        hovertemplate = "%{customdata}<extra></extra>",
+        customdata = as.character(sub$hover_payload),
+        hoverinfo = "none",
         textinfo = "text",
         textposition = "inside",
         insidetextorientation = "horizontal",
@@ -506,7 +510,7 @@ plot_status_prop_pies_plotly_v2 <- function(
     annotations = ann
   )
 
-  plotly::config(
+  p <- plotly::config(
     p,
     toImageButtonOptions = list(
       filename = paste0("Status_pies_", format(Sys.Date(), "%d-%b-%y")),
@@ -514,6 +518,45 @@ plot_status_prop_pies_plotly_v2 <- function(
       scale = 3
     )
   )
+
+  renderer <- r"---(
+function(el, x) {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'status-pies-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.style.display = 'none';
+  tooltip.innerHTML = '<style>' +
+    '.status-pies-tooltip{position:fixed;z-index:2147483000;width:400px;max-width:calc(100vw - 20px);max-height:calc(100vh - 20px);overflow-y:auto;box-sizing:border-box;padding:15px 16px;background:#fff;color:#243746;border:1px solid #d8e2ea;border-radius:8px;box-shadow:0 10px 32px rgba(15,33,45,.22);font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;pointer-events:auto;}' +
+    '.status-pies-tooltip *{box-sizing:border-box;}' +
+    '.status-pies-tooltip .sp-title{font-size:16px;font-weight:700;overflow-wrap:anywhere;}' +
+    '.status-pies-tooltip .sp-muted{font-size:11px;color:#697b87;}' +
+    '.status-pies-tooltip .sp-summary{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 0;border-bottom:1px solid #e4eaf0;}' +
+    '.status-pies-tooltip .sp-percent{font-size:21px;font-weight:750;white-space:nowrap;}' +
+    '.status-pies-tooltip .sp-section{font-size:12px;font-weight:700;margin-top:10px;}' +
+    '.status-pies-tooltip .sp-stock{font-size:11px;font-weight:650;overflow-wrap:anywhere;padding:7px 0;border-bottom:1px solid #eef2f5;}' +
+    '</style>';
+  const safe = value => String(value == null ? '' : value).replace(/[&<>"']/g,
+    character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
+  const pct = value => typeof value === 'number' && Number.isFinite(value) ?
+    value.toFixed(1) + '%' : 'Not available';
+  const build = function(data) {
+    let html = '<div class="sp-title">' + safe(data.guild) + '</div>' +
+      '<div class="sp-muted">' + safe(data.indicator) + ' | ' + safe(data.status) + '</div>' +
+      '<div class="sp-summary"><div><b>' + safe(data.n_stocks) + ' / ' + safe(data.total_stocks) +
+      ' stocks</b><div class="sp-muted">Stocks in slice / guild total</div></div>' +
+      '<div class="sp-percent">' + pct(data.pct) + '</div></div>' +
+      '<div class="sp-section">Stocks in slice</div>';
+    (Array.isArray(data.stocks) ? data.stocks : []).forEach(function(stock) {
+      html += '<div class="sp-stock">' + safe(stock) + '</div>';
+    });
+    if (data.additional_stocks > 0) html += '<div class="sp-muted" style="margin-top:7px">... and ' +
+      safe(data.additional_stocks) + ' more stocks</div>';
+    return html;
+  };
+  return {tooltip, build};
+}
+)---"
+  add_html_hover(p, renderer)
 }
 
 # Catch/landing-weighted GES pies (six guild columns, two F/B rows).
@@ -600,7 +643,7 @@ plot_GES_pies_plotly_v2 <- function(
     ) |>
     dplyr::distinct()
 
-  if (nrow(stock_df) == 0L) stop("No stocks in x.")
+  if (nrow(stock_df) == 0L) stop_plot_no_data("No stocks in x.")
 
   # Exact duplicate rows are harmless, but differing records for the
   # same stock should not be joined/counted twice.
@@ -728,8 +771,10 @@ plot_GES_pies_plotly_v2 <- function(
     dplyr::filter(is.finite(CATCH), CATCH > 0)
 
   if (nrow(weighted) == 0L) {
-    stop("No stocks have positive Catches_in_ecoregion or ",
-         "Landings_in_ecoregion values.")
+    stop_plot_no_data(paste0(
+      "No stocks have positive Catches_in_ecoregion or ",
+      "Landings_in_ecoregion values."
+    ))
   }
 
   # Stock-level hover text within each status slice.

@@ -1,4 +1,4 @@
-# TAF REPORT: prepare regional plot data and export stock-count status pies.
+# TAF REPORT: prepare regional plot data and export pies, discards and Kobe plots.
 library(dplyr)
 source("utilities.R")
 source("utilities_plotting.R")
@@ -79,11 +79,83 @@ dir.create("report/plot_data", recursive = TRUE, showWarnings = FALSE)
 can_plot <- requireNamespace("plotly", quietly = TRUE) &&
   requireNamespace("htmlwidgets", quietly = TRUE) &&
   exists("plot_status_prop_pies_plotly_v2", mode = "function")
-if (can_plot) {
-  dir.create("report/status_pies", recursive = TRUE, showWarnings = FALSE)
+export_dir <- "report/html_plots"
+dir.create(export_dir, recursive = TRUE, showWarnings = FALSE)
+kobe_guilds <- c("benthic", "demersal", "elasmobranch", "pelagic", "shellfish")
+expected_plot_index <- expand.grid(
+  plot_type = c("stock_summary", "ges", "discards"),
+  ecoregion_id = vapply(ecoregions, get_ecoregion_acronym, character(1)),
+  guild_id = "",
+  stringsAsFactors = FALSE
+)
+expected_plot_index <- bind_rows(
+  expected_plot_index,
+  expand.grid(
+    plot_type = "kobe",
+    ecoregion_id = vapply(ecoregions, get_ecoregion_acronym, character(1)),
+    guild_id = kobe_guilds,
+    stringsAsFactors = FALSE
+  )
+)
+expected_plot_index$file <- with(
+  expected_plot_index,
+  ifelse(nzchar(guild_id),
+         paste0(plot_type, "__", ecoregion_id, "__", guild_id, ".html"),
+         paste0(plot_type, "__", ecoregion_id, ".html"))
+)
+index_columns <- c("plot_type", "ecoregion_id", "guild_id", "file")
+stopifnot(
+  !anyDuplicated(expected_plot_index[c("plot_type", "ecoregion_id", "guild_id")]),
+  !anyDuplicated(expected_plot_index$file)
+)
+export_report <- transform(
+  expected_plot_index, status = "failed", reason = "Not attempted."
+)
+
+write_plot_export_report <- function() {
+  utils::write.csv(
+    export_report[export_report$status == "exported", index_columns, drop = FALSE],
+    file.path(export_dir, "plot_index.csv"), row.names = FALSE
+  )
+  utils::write.csv(export_report,
+                   file.path(export_dir, "plot_export_report.csv"), row.names = FALSE)
+}
+write_plot_export_report()
+
+save_plot_export <- function(plot_type, ecoregion_id, build_plot, guild_id = "") {
+  selection <- which(export_report$plot_type == plot_type &
+                       export_report$ecoregion_id == ecoregion_id &
+                       export_report$guild_id == guild_id)
+  stopifnot(length(selection) == 1L)
+  plot_file <- file.path(export_dir, export_report$file[[selection]])
+  outcome <- tryCatch({
+    if (file.exists(plot_file) && unlink(plot_file) != 0L) {
+      stop("Could not remove previous export: ", plot_file)
+    }
+    if (!can_plot) stop("HTML export requires plotly, htmlwidgets and plotting helpers.")
+    plot <- build_plot()
+    htmlwidgets::saveWidget(plot, file = plot_file,
+                            selfcontained = FALSE, libdir = "lib")
+    if (!file.exists(plot_file) || file.info(plot_file)$size <= 0) {
+      stop("HTML export was not written: ", plot_file)
+    }
+    list(status = "exported", reason = "")
+  }, plot_no_data = function(error) {
+    list(status = "no_data", reason = conditionMessage(error))
+  }, error = function(error) {
+    list(status = "failed", reason = conditionMessage(error))
+  })
+  if (outcome$status != "exported" && file.exists(plot_file)) unlink(plot_file)
+  export_report$status[[selection]] <<- outcome$status
+  export_report$reason[[selection]] <<- outcome$reason
+  write_plot_export_report()
+    message(plot_type, " / ", ecoregion_id,
+      if (nzchar(guild_id)) paste0(" / ", guild_id) else "", ": ", outcome$status,
+          if (nzchar(outcome$reason)) paste0(" - ", outcome$reason) else "")
+  invisible(outcome)
 }
 
-for (region in ecoregions) {
+tryCatch(for (region in ecoregions) {
   code <- get_ecoregion_acronym(region)
   regional_current <- stocks[stocks$Ecoregion == region, , drop = FALSE]
   if (!nrow(regional_current)) stop("Missing current stocks for ", region)
@@ -129,38 +201,49 @@ for (region in ecoregions) {
   message("Prepared ", code, ": ", nrow(regional_current),
           " current rows and ", nrow(regional_annual), " annual rows.")
 
-  if (can_plot) {
-    tryCatch({
-      p <- plot_status_prop_pies_plotly_v2(regional_current)
-      htmlwidgets::saveWidget(p,
-        file = file.path("report/status_pies", paste0("status_pies_", code, ".html")),
-        selfcontained = TRUE)
-    }, error = function(e) warning("Could not save pies for ", region, ": ",
-                                   conditionMessage(e)))
-    tryCatch({
-      p <- plot_GES_pies_plotly_v2(regional_current)
-      htmlwidgets::saveWidget(p,
-        file = file.path("report/status_pies", paste0("ges_pies_", code, ".html")),
-        selfcontained = TRUE)
-    }, error = function(e) warning("Could not save GES pies for ", region, ": ",
-                                   conditionMessage(e)))
-    tryCatch({
-      regional_discards <- regional_annual %>%
-        rename(
-          Landings_ecoregion = Landings_in_ecoregion,
-          Discards_ecoregion = Discards_in_ecoregion,
-          Catches_ecoregion = Catches_in_ecoregion
-        )
-      p <- plot_discard_trends_app_plotly_v3(
-        regional_discards,
-        year = regional_current$AssessmentSnapshotYear[[1L]],
-        ecoregion = region
+  save_plot_export("stock_summary", code, function() {
+    plot_status_prop_pies_plotly_v2(regional_current)
+  })
+  save_plot_export("ges", code, function() {
+    plot_GES_pies_plotly_v2(regional_current)
+  })
+  save_plot_export("discards", code, function() {
+    regional_discards <- regional_annual %>%
+      rename(
+        Landings_ecoregion = Landings_in_ecoregion,
+        Discards_ecoregion = Discards_in_ecoregion,
+        Catches_ecoregion = Catches_in_ecoregion
       )
-      dir.create("report/discard_trends", recursive = TRUE, showWarnings = FALSE)
-      htmlwidgets::saveWidget(p,
-        file = file.path("report/discard_trends", paste0("discard_trends_", code, ".html")),
-        selfcontained = TRUE)
-    }, error = function(e) warning("Could not save discard trends for ", region, ": ",
-                                   conditionMessage(e)))
+    cutoff_year <- regional_current$AssessmentSnapshotYear[[1L]]
+    discard_data <- plot_discard_trends_app_plotly_v3(
+      regional_discards, year = cutoff_year, return_data = TRUE
+    )
+    if (!nrow(discard_data)) {
+      stop_plot_no_data("No usable regional landings and discards in the reporting period.")
+    }
+    plot_discard_trends_app_plotly_v3(
+      regional_discards, year = cutoff_year, ecoregion = region
+    )
+  })
+  for (guild in kobe_guilds) {
+    save_plot_export("kobe", code, function() {
+      guild_stocks <- filter(regional_current, FisheriesGuild %in% guild)
+      if (!nrow(guild_stocks)) {
+        stop_plot_no_data(paste0("No stocks for fisheries guild: ", guild))
+      }
+      plot_kobe_app_plotly_v3(regional_current, guild = guild)
+    }, guild_id = guild)
   }
+}, error = function(error) {
+  unattempted <- export_report$reason == "Not attempted."
+  export_report$reason[unattempted] <<- paste0(
+    "Report preparation failed: ", conditionMessage(error)
+  )
+  write_plot_export_report()
+  stop(error)
+})
+
+if (any(export_report$status == "failed")) {
+  stop("HTML plot collection is incomplete: ", sum(export_report$status == "failed"),
+       " failed exports. See ", file.path(export_dir, "plot_export_report.csv"))
 }

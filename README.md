@@ -27,7 +27,13 @@ output.R                       -> output/regions/stocks_<code>.rds
 
 report_1_summary.R             -> report/reference_point_summary.md
                                   report/stock_status_coverage.csv
-report_2_plotting.R             -> report/status_pies/status_pies_<code>.html (optional)
+report_2_plotting.R             -> report/html_plots/stock_summary__<code>.html (optional)
+                                  report/html_plots/ges__<code>.html (optional)
+                                  report/html_plots/discards__<code>.html (optional)
+                                  report/html_plots/kobe__<code>__<guild>.html (optional)
+                                  report/html_plots/lib/ (shared dependencies)
+                                  report/html_plots/plot_index.csv
+                                  report/html_plots/plot_export_report.csv
 ```
 
 The **boot** scripts are executed by `taf.boot()` in their own `boot/data/<script_name>/` working directories, exactly as in your repo. Each script now retrieves all configured ecoregions (SAG and settings: one request per region; SID: one active-year download, then region splitting). They write the *same named files* your `DATA.bib` expects, but with a `TAF_Ecoregion` column to separate stock/assessment records. `data.R` reads those files and removes `TAF_Ecoregion` before calling your existing `format_sag()`. No subsequent stage performs API requests.
@@ -56,6 +62,10 @@ Alternatively run `taf.boot(force = TRUE)` and then source `data.R`, `model.R`, 
 source("report_1_summary.R")
 source("report_2_plotting.R")
 ```
+
+Plot HTML files are exported with `selfcontained = FALSE` and share the sibling `lib/` directory. Keep the entire `report/html_plots/` directory together when copying or publishing plots; HTML files alone are not portable. Existing files in the former `report/status_pies/` and `report/discard_trends/` directories are not updated or removed.
+
+`plot_index.csv` maps successfully exported selections to HTML basenames using `plot_type`, `ecoregion_id`, `guild_id`, and `file`. Ecoregion IDs use the existing acronyms; `guild_id` is empty for pies and discard trends. Kobe exports use the five guild IDs `benthic`, `demersal`, `elasmobranch`, `pelagic`, and `shellfish`, retaining the existing plotting function's defaults. `plot_export_report.csv` records all 88 expected selections (33 regional plots and 55 region/guild Kobe plots), with `status` (`exported`, `no_data`, or `failed`) and a `reason`. Absent Kobe guilds and other known no-data cases are recorded explicitly and omitted from the selection index. Both CSVs are updated after each export; a previous HTML for an attempted selection is removed before regeneration so a stale file cannot appear successful. Duplicate selection keys or filenames are rejected, and unexpected export errors cause the run to fail after recording the outcomes. Plotting packages remain optional for the summary, but missing dependencies now count as failures when running the plotting stage.
 
 ## Reference-point policy
 
