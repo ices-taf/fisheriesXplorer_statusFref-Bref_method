@@ -1356,13 +1356,20 @@ stockstatus_CLD_current_proxy <- function(x) {
   # ---------- Join F and B sides ----------
   df4 <- dplyr::full_join(df_F, df_B, by = c("StockKeyLabel","FisheriesGuild"))
 
-  # ---------- Status classification ----------
+  # Independent F/B statuses, using prepare_precautionary_status_pies() rules.
   df4 <- df4 %>%
     dplyr::mutate(
-      Status = dplyr::case_when(
-        is.na(F_FMSY) | is.na(SSB_MSYBtrigger) ~ "GREY",
-        F_FMSY < 1 & SSB_MSYBtrigger >= 1       ~ "GREEN",
-        TRUE                                    ~ "RED"
+      FStatus = dplyr::case_when(
+        !is.finite(FMSY) | FMSY <= 0 ~ "GREY",
+        !is.finite(F_FMSY) | F_FMSY < 0 ~ "GREY",
+        F_FMSY > 1 ~ "RED",
+        TRUE ~ "GREEN"
+      ),
+      BStatus = dplyr::case_when(
+        !is.finite(MSYBtrigger) | MSYBtrigger <= 0 ~ "GREY",
+        !is.finite(SSB_MSYBtrigger) | SSB_MSYBtrigger < 0 ~ "GREY",
+        SSB_MSYBtrigger < 1 ~ "RED",
+        TRUE ~ "GREEN"
       )
     )
 
