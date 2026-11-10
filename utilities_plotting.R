@@ -1133,14 +1133,14 @@ function(el, x) {
 
 
 
-# Kobe v3 with capped Unknown panel and responsive autosizing.
+# Kobe v3 with responsive autosizing.
 # Extracted from the latest utilities_GES_pies.R.
 
 plot_kobe_app_plotly_v3 <- function(
     x,
     guild,
     return_data = FALSE,
-    size_by_catches = FALSE,
+    size_by_catches = TRUE,
     min_point_size = 8,
     max_point_size = 25,
     n_size_legend = 4,
@@ -1278,11 +1278,6 @@ plot_kobe_app_plotly_v3 <- function(
 
   # 6. Derive linear main-axis limits from stocks with both ratios.
   plot_df <- df[known, , drop = FALSE]
-  unknown_df <- df[!known, , drop = FALSE]
-  n_unknown_total <- nrow(unknown_df)
-  has_unknown <- n_unknown_total > 0L
-  # All unknown stocks remain in df; only the right-panel display is capped.
-  n_unknown_shown <- as.integer(min(n_unknown_total, max_unknown_stocks))
 
   if (nrow(plot_df) > 0L) {
     xmin <- min(c(plot_df$F_FMSY, 1))
@@ -1326,7 +1321,6 @@ plot_kobe_app_plotly_v3 <- function(
     " t"
   )
   plot_df <- df[known, , drop = FALSE]
-  unknown_df <- df[!known, , drop = FALSE]
 
   p <- plotly::plot_ly()
   stock_annotations <- list()
@@ -1358,10 +1352,8 @@ plot_kobe_app_plotly_v3 <- function(
       )
 
       for (k in seq_len(nrow(sub))) {
-        # In the split view, place labels for right-edge stocks to their
-        # left, reducing spillover into the unknown-status panel.
-        at_right_edge <- has_unknown &&
-          sub$F_FMSY[[k]] > (x_range[[2]] - 0.20 * diff(x_range))
+        at_right_edge <- sub$F_FMSY[[k]] >
+          (x_range[[2]] - 0.20 * diff(x_range))
         label_shift <- sub$point_size[[k]] / 2 + 8
 
         stock_annotations[[length(stock_annotations) + 1L]] <<- list(
@@ -1388,50 +1380,6 @@ plot_kobe_app_plotly_v3 <- function(
     "circle-open", 2, 1
   )
 
-  # 9. Unknown panel: show up to max_unknown_stocks, ordered by catches.
-  # Keep all unknown stocks for return_data and shared size scaling.
-  # Separate x3/y3 axes are independent of the F/B axes.
-  if (has_unknown) {
-    unknown_df <- dplyr::arrange(
-      unknown_df, dplyr::desc(CatchSizeValue), StockKeyLabel
-    )
-    unknown_df <- unknown_df[seq_len(n_unknown_shown), , drop = FALSE]
-    unknown_df$PanelX <- rep(0.13, nrow(unknown_df))
-    unknown_df$PanelY <- rev(seq_len(nrow(unknown_df)))
-    unknown_df$PanelLabel <- substr(as.character(unknown_df$StockKeyLabel), 1, 24)
-
-    for (proxy_type in c("Reference point", "Proxy reference point")) {
-      sub <- unknown_df[
-        unknown_df$ProxyFlag == proxy_type, , drop = FALSE
-      ]
-      if (nrow(sub) == 0L) next
-      is_proxy <- identical(proxy_type, "Proxy reference point")
-
-      p <- plotly::add_trace(
-        p,
-        data = sub,
-        type = "scatter", mode = "markers+text",
-        x = ~PanelX, y = ~PanelY,
-        xaxis = "x3", yaxis = "y3",
-        text = ~PanelLabel, textposition = "middle right",
-        textfont = list(size = 10, color = "#333333"),
-        marker = list(
-          symbol = if (is_proxy) "circle-open" else "circle",
-          size = sub$point_size,
-          color = if (is_proxy) "#858585" else status_pal[["Unknown"]],
-          line = list(
-            color = if (is_proxy) "#858585" else "#333333",
-            width = if (is_proxy) 2 else 0.1
-          )
-        ),
-        customdata = ~hover_text,
-        hovertemplate = "%{customdata}<extra></extra>",
-        showlegend = FALSE, inherit = FALSE,
-        cliponaxis = FALSE
-      )
-    }
-  }
-
   # 10. Legend for standard / proxy markers (unchanged).
   legend_defs <- list(
     "Reference point" = list(symbol = "circle", width = 0.1),
@@ -1451,7 +1399,7 @@ plot_kobe_app_plotly_v3 <- function(
     )
   }
 
-  # 11. ONE size legend covering stocks in BOTH panels.
+  # 11. ONE size legend.
   if (isTRUE(size_by_catches) && length(size_values) > 0L) {
     # Number of representative sizes displayed in the legend
     if (!is.numeric(n_size_legend) ||
@@ -1495,10 +1443,7 @@ plot_kobe_app_plotly_v3 <- function(
     }
   }
 
-  # 12. Layout: reserve a side domain only if unknown stocks exist.
-  # No unknown stocks -> the regular Kobe plot occupies the full width.
-  main_domain <- if (has_unknown) c(0, 0.72) else c(0, 1)
-  legend_outside <- isTRUE(size_by_catches) || has_unknown
+  legend_outside <- isTRUE(size_by_catches)
   layout_shapes <- list(
     list(
       type = "line", x0 = 1, x1 = 1,
@@ -1512,39 +1457,6 @@ plot_kobe_app_plotly_v3 <- function(
     )
   )
   layout_annotations <- stock_annotations
-
-  if (has_unknown) {
-    layout_shapes <- c(
-      list(
-        list(
-          type = "rect", xref = "paper", yref = "paper",
-          x0 = 0.78, x1 = 1, y0 = 0, y1 = 1,
-          fillcolor = "rgba(245,245,245,0.55)",
-          line = list(width = 0), layer = "below"
-        ),
-        list(
-          type = "line", xref = "paper", yref = "paper",
-          x0 = 0.765, x1 = 0.765, y0 = 0, y1 = 1,
-          line = list(color = "#CCCCCC", width = 1)
-        )
-      ),
-      layout_shapes
-    )
-    layout_annotations[[length(layout_annotations) + 1L]] <- list(
-      x = 0.89, y = 1.035, xref = "paper", yref = "paper",
-      text = paste0("<b>Unknown status (", n_unknown_total, ")</b>"),
-      xanchor = "center", yanchor = "bottom", showarrow = FALSE,
-      font = list(size = 12, color = "#333333")
-    )
-    if (n_unknown_shown < n_unknown_total) {
-      layout_annotations[[length(layout_annotations) + 1L]] <- list(
-        x = 0.89, y = 1.005, xref = "paper", yref = "paper",
-        text = paste0("Showing ", n_unknown_shown, " of ", n_unknown_total),
-        xanchor = "center", yanchor = "bottom", showarrow = FALSE,
-        font = list(size = 10, color = "#666666")
-      )
-    }
-  }
 
   layout_annotations[[length(layout_annotations) + 1L]] <- list(
     x = 1, y = -0.14, xref = "paper", yref = "paper",
@@ -1562,7 +1474,7 @@ plot_kobe_app_plotly_v3 <- function(
     autosize = TRUE,
     paper_bgcolor = "white", plot_bgcolor = "white",
     xaxis = list(
-      title = "F/Fref", domain = main_domain,
+      title = "F/Fref", domain = c(0, 1),
       range = x_range, zeroline = FALSE
     ),
     yaxis = list(
@@ -1577,15 +1489,6 @@ plot_kobe_app_plotly_v3 <- function(
       overlaying = "y", visible = FALSE, range = c(0, 1),
       fixedrange = TRUE, autorange = FALSE
     ),
-    xaxis3 = if (has_unknown) list(
-      domain = c(0.79, 1), anchor = "y3", range = c(0, 1),
-      visible = FALSE, fixedrange = TRUE
-    ) else NULL,
-    yaxis3 = if (has_unknown) list(
-      domain = c(0, 1), anchor = "x3",
-      range = c(0.5, n_unknown_shown + 0.5),
-      visible = FALSE, fixedrange = TRUE
-    ) else NULL,
     shapes = layout_shapes,
     legend = list(
       title = list(text = "ICES reference point"),
@@ -1600,7 +1503,7 @@ plot_kobe_app_plotly_v3 <- function(
     hovermode = "closest",
     margin = list(
       l = 90, r = if (legend_outside) 280 else 30,
-      t = if (has_unknown) 55 else 30, b = 70
+      t = 30, b = 70
     ),
     annotations = layout_annotations
   )
