@@ -814,7 +814,7 @@ plot_GES_pies_plotly_v2 <- function(
       " (", sprintf("%.1f%%", slices$pct[[i]]), ")<br>",
       "Stocks in slice: ", slices$COUNT[[i]], "<br>",
       "Stocks excluded from this guild: ", slices$excluded_stocks[[i]], "<br>",
-      "No landings share available: ", slices$excluded_share_unavailable[[i]], "<br>",
+      "No ecoregion landings share available: ", slices$excluded_share_unavailable[[i]], "<br>",
       "No positive catch/landings (zero, missing or invalid quantity): ",
       slices$excluded_no_positive_quantity[[i]], "<br><br>",
       "<b>Catch by stock</b><br>", slices$breakdown_html[[i]]
@@ -1058,7 +1058,7 @@ function(el, x) {
       '<div class="gp-summary"><b>' + fmt(data.inside_t) + ' t in ecoregion</b> (' + pct(data.pct) + ' of guild)' +
       '<div class="gp-muted">' + safe(data.n_stocks) + ' stocks in slice; ' +
       safe(data.excluded_stocks) + ' excluded from guild' +
-      '<br>No landings share available: ' + safe(data.excluded_share_unavailable) +
+      '<br>No ecoregion landings share available: ' + safe(data.excluded_share_unavailable) +
       '<br>No positive catch/landings (zero, missing or invalid quantity): ' +
       safe(data.excluded_no_positive_quantity) + '</div></div>' +
       '<div class="gp-muted" style="margin-top:9px"><i class="gp-key gp-in"></i>Inside ecoregion ' +
@@ -1593,7 +1593,7 @@ plot_discard_trends_app_plotly_v3 <- function(
   # contribute to the guild-year numerator/denominator.
   # complete_pairs = FALSE: independently sum available landings/discards,
   # matching the original function's na.rm = TRUE treatment. A stock is
-  # excluded only when BOTH landings and discards are missing.
+  # excluded when BOTH values are missing or their known sum is zero.
   #
   # The returned data (return_data = TRUE) has one row per plotted guild-year,
   # including all coverage/exclusion metrics and the structured stock breakdown.
@@ -1720,12 +1720,20 @@ plot_discard_trends_app_plotly_v3 <- function(
     rep(NA_real_, nrow(x))
   }
 
+  share_unavailable <- if ("share" %in% names(x)) {
+    share_values <- to_number(x$share)
+    !is.finite(share_values) | share_values < 0 | share_values > 1
+  } else {
+    rep(FALSE, nrow(x))
+  }
+
   # One observation per stock-year; no rowid_to_column/spread/gather joins.
   df_all <- x |>
     dplyr::transmute(
       Year = to_number(Year),
       StockKeyLabel = as.character(StockKeyLabel),
       FisheriesGuild = as.character(FisheriesGuild),
+      ShareUnavailable = share_unavailable,
       Landings_ecoregion = clean_nonnegative(Landings_ecoregion),
       Discards_ecoregion = clean_nonnegative(Discards_ecoregion),
       Catches_ecoregion = catch_values,
@@ -1757,7 +1765,12 @@ plot_discard_trends_app_plotly_v3 <- function(
         !is.na(Landings_ecoregion) & !is.na(Discards_ecoregion)
       } else {
         !is.na(Landings_ecoregion) | !is.na(Discards_ecoregion)
-      }
+      },
+      usable = usable & (
+        dplyr::coalesce(Landings_ecoregion, 0) +
+          dplyr::coalesce(Discards_ecoregion, 0) > 0
+      ),
+      ExclusionReason = ecoregion_exclusion_reason(usable, ShareUnavailable)
     )
 
   # Denominator/data coverage and excluded known regional quantities.
@@ -1769,6 +1782,12 @@ plot_discard_trends_app_plotly_v3 <- function(
       n_available = dplyr::n(),
       n_included = sum(usable),
       n_excluded = sum(!usable),
+      excluded_share_unavailable = sum(
+        ExclusionReason == "share unavailable", na.rm = TRUE
+      ),
+      excluded_no_positive_quantity = sum(
+        ExclusionReason == "quantity unavailable or non-positive", na.rm = TRUE
+      ),
       n_included_missing_landings = sum(usable & is.na(Landings_ecoregion)),
       n_included_missing_discards = sum(usable & is.na(Discards_ecoregion)),
       n_excluded_missing_landings = sum(!usable & is.na(Landings_ecoregion)),
@@ -1847,6 +1866,9 @@ plot_discard_trends_app_plotly_v3 <- function(
           "<br>Method: ", method_label,
           "<br>Included stocks: ", n_included, " of ", n_available,
           " (", n_excluded, " excluded)",
+          "<br>No ecoregion landings share available: ", excluded_share_unavailable,
+          "<br>No usable landings/discards (zero, missing, invalid or incomplete pair): ",
+          excluded_no_positive_quantity,
           "<br>Excluded share of known ecoregion landings: ",
           display_percent(excluded_share_known_landings_pct)
         )
@@ -1867,6 +1889,10 @@ plot_discard_trends_app_plotly_v3 <- function(
           n_available = as.integer(d$n_available[[1]]),
           n_included = as.integer(d$n_included[[1]]),
           n_excluded = as.integer(d$n_excluded[[1]]),
+          excluded_share_unavailable =
+            as.integer(d$excluded_share_unavailable[[1]]),
+          excluded_no_positive_quantity =
+            as.integer(d$excluded_no_positive_quantity[[1]]),
           excluded_share_known_landings_pct =
             d$excluded_share_known_landings_pct[[1]],
           n_missing_landings_ecoregion =
@@ -1889,7 +1915,10 @@ plot_discard_trends_app_plotly_v3 <- function(
   if (isTRUE(return_data)) return(df5)
 
   if (!nrow(df5)) {
-    return(plotly::plot_ly() |>
+    return(plotly::plot_ly(
+      x = numeric(0), y = numeric(0), type = "scatter", mode = "markers",
+      showlegend = FALSE, hoverinfo = "skip"
+    ) |>
       plotly::layout(
         xaxis = list(visible = FALSE),
         yaxis = list(visible = FALSE),
@@ -2090,8 +2119,9 @@ function(el, x) {
       '<b>' + pct(d.excluded_share_known_landings_pct, 1) + '</b></div>' +
       coverageBar +
       '<div class="dv3-muted" style="margin-top:7px">' + safe(d.n_excluded) + ' excluded stock(s)' +
-      (d.n_missing_landings_ecoregion > 0 ? '; regional landings unknown for ' +
-        safe(d.n_missing_landings_ecoregion) + ' stock(s)' : '') + '</div></div>' +
+      '<br>No ecoregion landings share available: ' + safe(d.excluded_share_unavailable) +
+      '<br>No usable landings/discards (zero, missing, invalid or incomplete pair): ' +
+      safe(d.excluded_no_positive_quantity) + '</div></div>' +
       '<div class="dv3-rule"></div>' +
       '<div class="dv3-row" style="align-items:center"><span class="dv3-section">Included stock composition</span>' +
       '<span class="dv3-legend"><span><i class="dv3-key dv3-L"></i>Landings</span>' +

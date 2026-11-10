@@ -144,5 +144,23 @@ for (region in ecoregions) {
         selfcontained = TRUE)
     }, error = function(e) warning("Could not save GES pies for ", region, ": ",
                                    conditionMessage(e)))
+    tryCatch({
+      regional_discards <- regional_annual %>%
+        rename(
+          Landings_ecoregion = Landings_in_ecoregion,
+          Discards_ecoregion = Discards_in_ecoregion,
+          Catches_ecoregion = Catches_in_ecoregion
+        )
+      p <- plot_discard_trends_app_plotly_v3(
+        regional_discards,
+        year = regional_current$AssessmentSnapshotYear[[1L]],
+        ecoregion = region
+      )
+      dir.create("report/discard_trends", recursive = TRUE, showWarnings = FALSE)
+      htmlwidgets::saveWidget(p,
+        file = file.path("report/discard_trends", paste0("discard_trends_", code, ".html")),
+        selfcontained = TRUE)
+    }, error = function(e) warning("Could not save discard trends for ", region, ": ",
+                                   conditionMessage(e)))
   }
 }
