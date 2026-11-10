@@ -1,6 +1,102 @@
 # Stock-count pies (six guild columns, two F/B rows).
 # Extracted from the latest utilities_GES_pies.R.
 
+add_html_hover <- function(plot, renderer) {
+  js <- r"---(
+  const {tooltip, build} = view;
+  const isNumber = value => typeof value === 'number' && Number.isFinite(value);
+  if (typeof el.__htmlHoverCleanup === 'function') el.__htmlHoverCleanup();
+  document.body.appendChild(tooltip);
+  let lastPointer = null;
+  let hideTimer = null;
+  let observer = null;
+  function cancelHide() {
+    if (hideTimer !== null) { clearTimeout(hideTimer); hideTimer = null; }
+  }
+  function hideSoon() {
+    cancelHide();
+    hideTimer = setTimeout(function() { tooltip.style.display = 'none'; }, 180);
+  }
+  function position(xPos, yPos) {
+    if (!isNumber(xPos) || !isNumber(yPos)) return;
+    const pad = 10, offset = 18;
+    const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+    let left = xPos + offset;
+    if (left + tw + pad > window.innerWidth) left = xPos - tw - offset;
+    left = Math.max(pad, Math.min(left, window.innerWidth - tw - pad));
+    let top = yPos + 12;
+    if (top + th + pad > window.innerHeight) top = window.innerHeight - th - pad;
+    top = Math.max(pad, top);
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = top + 'px';
+  }
+  function onMove(event) {
+    lastPointer = {x:event.clientX, y:event.clientY};
+    if (tooltip.style.display !== 'none') position(event.clientX, event.clientY);
+  }
+  function onHover(event) {
+    const point = event && event.points && event.points[0];
+    if (!point) return;
+    let payload = point.customdata;
+    if (payload == null && point.data && point.data.customdata) {
+      payload = point.data.customdata[point.pointNumber];
+    }
+    if (Array.isArray(payload)) payload = payload[0];
+    if (typeof payload !== 'string') { hideSoon(); return; }
+    let data;
+    try { data = JSON.parse(payload); } catch(error) { hideSoon(); return; }
+    if (!data || typeof data !== 'object') { hideSoon(); return; }
+    cancelHide();
+    tooltip.innerHTML = tooltip.querySelector('style').outerHTML + build(data);
+    tooltip.style.display = 'block';
+    const mouse = event.event && isNumber(event.event.clientX) ?
+      {x:event.event.clientX, y:event.event.clientY} : lastPointer;
+    if (mouse) position(mouse.x, mouse.y);
+  }
+  function onUnhover() { hideSoon(); }
+  function onTipEnter() { cancelHide(); }
+  function onTipLeave() { hideSoon(); }
+  tooltip.addEventListener('mouseenter', onTipEnter);
+  tooltip.addEventListener('mouseleave', onTipLeave);
+  el.addEventListener('mousemove', onMove);
+  el.on('plotly_hover', onHover);
+  el.on('plotly_unhover', onUnhover);
+  const cleanup = function() {
+    cancelHide();
+    el.removeEventListener('mousemove', onMove);
+    if (typeof el.removeListener === 'function') {
+      el.removeListener('plotly_hover', onHover);
+      el.removeListener('plotly_unhover', onUnhover);
+    }
+    tooltip.removeEventListener('mouseenter', onTipEnter);
+    tooltip.removeEventListener('mouseleave', onTipLeave);
+    if (tooltip.parentNode) tooltip.parentNode.removeChild(tooltip);
+    if (observer) observer.disconnect();
+    if (el.__htmlHoverCleanup === cleanup) delete el.__htmlHoverCleanup;
+  };
+  el.__htmlHoverCleanup = cleanup;
+  observer = new MutationObserver(function() {
+    if (!document.body.contains(el)) cleanup();
+  });
+  observer.observe(document.body, {childList:true, subtree:true});
+)---"
+  htmlwidgets::onRender(plot, paste0(
+    "function(el, x) { const view = (", renderer, ")(el, x);\n", js, "\n}"
+  ))
+}
+
+ecoregion_exclusion_reason <- function(usable, share_unavailable = FALSE) {
+  stopifnot(
+    is.logical(usable), is.logical(share_unavailable),
+    length(share_unavailable) %in% c(1L, length(usable))
+  )
+  excluded <- !usable %in% TRUE
+  reason <- rep(NA_character_, length(usable))
+  reason[excluded] <- "quantity unavailable or non-positive"
+  reason[excluded & share_unavailable %in% TRUE] <- "share unavailable"
+  reason
+}
+
 prepare_precautionary_status_pies <- function(df) {
 
   required <- c(
@@ -324,9 +420,10 @@ plot_status_prop_pies_plotly_v2 <- function(
       }
 
       ann[[length(ann) + 1L]] <- list(
-        x = (x0 + x1) / 2,
-        y = y0 - 0.025,
+        x = mean(c(x0, x1)),
+        y = y0 - 0.012,
         xref = "paper", yref = "paper",
+        xanchor = "center",
         text = paste0("total = ", pie_total, " stocks"),
         showarrow = FALSE,
         font = list(size = 10),
@@ -459,6 +556,12 @@ plot_GES_pies_plotly_v2 <- function(
   if (!"Landings_in_ecoregion" %in% names(y)) {
     y$Landings_in_ecoregion <- NA_real_
   }
+  if (!"Catches_out_ecoregion" %in% names(y)) {
+    y$Catches_out_ecoregion <- NA_real_
+  }
+  if (!"Landings_out_ecoregion" %in% names(y)) {
+    y$Landings_out_ecoregion <- NA_real_
+  }
 
   to_number <- function(z) suppressWarnings(as.numeric(as.character(z)))
   clean_nonnegative <- function(z) {
@@ -530,22 +633,37 @@ plot_GES_pies_plotly_v2 <- function(
   # 2. Attach ecoregion catches, falling back to landings.
   #    Missing catch weights are not converted into status GREY.
   # ---------------------------------------------------------
+  share_unavailable <- if ("share" %in% names(y)) {
+    share_values <- to_number(y$share)
+    !is.finite(share_values) | share_values < 0 | share_values > 1
+  } else {
+    rep(FALSE, nrow(y))
+  }
   catch_df <- y |>
     dplyr::transmute(
       StockKeyLabel = as.character(StockKeyLabel),
+      ShareUnavailable = share_unavailable,
       catch_value = clean_nonnegative(Catches_in_ecoregion),
-      landing_value = clean_nonnegative(Landings_in_ecoregion)
+      landing_value = clean_nonnegative(Landings_in_ecoregion),
+      outside_catch = clean_nonnegative(Catches_out_ecoregion),
+      outside_landings = clean_nonnegative(Landings_out_ecoregion)
     ) |>
     dplyr::filter(!is.na(StockKeyLabel), nzchar(StockKeyLabel)) |>
     dplyr::mutate(
       CATCH = dplyr::coalesce(catch_value, landing_value),
+      OUT_CATCH = dplyr::case_when(
+        !is.na(catch_value) ~ outside_catch,
+        !is.na(landing_value) ~ outside_landings,
+        TRUE ~ NA_real_
+      ),
       CatchSource = dplyr::case_when(
         !is.na(catch_value) ~ "Catches",
         !is.na(landing_value) ~ "Landings",
         TRUE ~ "Missing"
       )
     ) |>
-    dplyr::select(StockKeyLabel, CATCH, CatchSource) |>
+    dplyr::select(StockKeyLabel, CATCH, OUT_CATCH, CatchSource,
+            ShareUnavailable) |>
     dplyr::distinct()
 
   repeated_catch <- catch_df |>
@@ -559,7 +677,12 @@ plot_GES_pies_plotly_v2 <- function(
   }
 
   stock_df <- stock_df |>
-    dplyr::left_join(catch_df, by = "StockKeyLabel")
+    dplyr::left_join(catch_df, by = "StockKeyLabel") |>
+    dplyr::mutate(
+      ExclusionReason = ecoregion_exclusion_reason(
+        is.finite(CATCH) & CATCH > 0, ShareUnavailable %in% TRUE
+      )
+    )
 
   # ---------------------------------------------------------
   # 3. Long data: each stock contributes to BOTH indicators.
@@ -567,12 +690,14 @@ plot_GES_pies_plotly_v2 <- function(
   long_df <- dplyr::bind_rows(
     stock_df |>
       dplyr::transmute(
-        StockKeyLabel, FisheriesGuild, CATCH, CatchSource,
+        StockKeyLabel, FisheriesGuild, CATCH, OUT_CATCH, CatchSource,
+        ExclusionReason,
         Indicator = "Fref", Colour = F_Status
       ),
     stock_df |>
       dplyr::transmute(
-        StockKeyLabel, FisheriesGuild, CATCH, CatchSource,
+        StockKeyLabel, FisheriesGuild, CATCH, OUT_CATCH, CatchSource,
+        ExclusionReason,
         Indicator = "Bref", Colour = B_Status
       )
   )
@@ -590,6 +715,12 @@ plot_GES_pies_plotly_v2 <- function(
     dplyr::summarise(
       n_stocks = dplyr::n(),
       excluded_stocks = sum(!is.finite(CATCH) | CATCH <= 0),
+      excluded_share_unavailable = sum(
+        ExclusionReason == "share unavailable", na.rm = TRUE
+      ),
+      excluded_no_positive_quantity = sum(
+        ExclusionReason == "quantity unavailable or non-positive", na.rm = TRUE
+      ),
       .groups = "drop"
     )
 
@@ -633,12 +764,31 @@ plot_GES_pies_plotly_v2 <- function(
     paste(lines, collapse = "<br>")
   }
 
+  build_stock_breakdown <- function(stock_ids, catches, outside, sources) {
+    shown <- utils::head(order(catches, decreasing = TRUE), max_hover_stocks)
+    list(
+      stocks = lapply(shown, function(index) {
+        list(
+          stock = stock_ids[[index]],
+          inside_t = catches[[index]],
+          outside_t = outside[[index]],
+          source = sources[[index]],
+          slice_pct = 100 * catches[[index]] / sum(catches)
+        )
+      }),
+      n_more = length(stock_ids) - length(shown)
+    )
+  }
+
   slices <- weighted |>
     dplyr::group_by(FisheriesGuild, Indicator, Colour) |>
     dplyr::summarise(
       Catch = sum(CATCH),
       COUNT = dplyr::n(),
       breakdown_html = build_breakdown(StockKeyLabel, CATCH, CatchSource),
+      stock_breakdown = list(build_stock_breakdown(
+        StockKeyLabel, CATCH, OUT_CATCH, CatchSource
+      )),
       stock_ids = list(StockKeyLabel),
       .groups = "drop"
     ) |>
@@ -663,10 +813,31 @@ plot_GES_pies_plotly_v2 <- function(
       "Catch / landings: ", format_tonnes(slices$Catch[[i]]), " t",
       " (", sprintf("%.1f%%", slices$pct[[i]]), ")<br>",
       "Stocks in slice: ", slices$COUNT[[i]], "<br>",
-      "Stocks excluded from this guild (no positive catch): ",
-      slices$excluded_stocks[[i]], "<br><br>",
+      "Stocks excluded from this guild: ", slices$excluded_stocks[[i]], "<br>",
+      "No landings share available: ", slices$excluded_share_unavailable[[i]], "<br>",
+      "No positive catch/landings (zero, missing or invalid quantity): ",
+      slices$excluded_no_positive_quantity[[i]], "<br><br>",
       "<b>Catch by stock</b><br>", slices$breakdown_html[[i]]
     )
+  }, character(1))
+
+  slices$hover_payload <- vapply(seq_len(nrow(slices)), function(index) {
+    jsonlite::toJSON(
+      list(
+        guild = slices$FisheriesGuild[[index]],
+        indicator = headers[[slices$Indicator[[index]]]],
+        status = slices$Colour[[index]],
+        inside_t = slices$Catch[[index]],
+        pct = slices$pct[[index]],
+        n_stocks = slices$COUNT[[index]],
+        excluded_stocks = slices$excluded_stocks[[index]],
+        excluded_share_unavailable = slices$excluded_share_unavailable[[index]],
+        excluded_no_positive_quantity = slices$excluded_no_positive_quantity[[index]],
+        stocks = slices$stock_breakdown[[index]]$stocks,
+        additional_stocks = slices$stock_breakdown[[index]]$n_more
+      ),
+      auto_unbox = TRUE, na = "null", null = "null", digits = 12
+    ) |> as.character()
   }, character(1))
 
   if (isTRUE(return_data)) return(slices)
@@ -772,9 +943,9 @@ plot_GES_pies_plotly_v2 <- function(
         type = "pie",
         labels = as.character(sub$Colour),
         values = as.numeric(sub$Catch),
-        customdata = as.character(sub$hover_text),
-        hovertemplate = "%{customdata}<extra></extra>",
-        textinfo = "label+percent",
+        customdata = as.character(sub$hover_payload),
+        hoverinfo = "none",
+        textinfo = "percent",
         textposition = "auto",
         insidetextorientation = "horizontal",
         sort = FALSE,
@@ -833,6 +1004,7 @@ plot_GES_pies_plotly_v2 <- function(
   p <- plotly::layout(
     p,
     height = plot_height,
+    showlegend = FALSE,
     paper_bgcolor = "white", plot_bgcolor = "white",
     # legend = list(
     #   title = list(text = "Status"),
@@ -845,13 +1017,73 @@ plot_GES_pies_plotly_v2 <- function(
     annotations = annotations
   )
 
-  plotly::config(
+  p <- plotly::config(
     p,
     toImageButtonOptions = list(
       filename = paste0("GES_pies_precautionary_", format(Sys.Date(), "%d-%b-%y")),
       format = "png", scale = 3
     )
   )
+
+  renderer <- r"---(
+function(el, x) {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'ges-pies-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.style.display = 'none';
+  tooltip.innerHTML = '<style>' +
+    '.ges-pies-tooltip{position:fixed;z-index:2147483000;width:400px;max-width:calc(100vw - 20px);max-height:calc(100vh - 20px);overflow-y:auto;box-sizing:border-box;padding:15px 16px;background:#fff;color:#243746;border:1px solid #d8e2ea;border-radius:8px;box-shadow:0 10px 32px rgba(15,33,45,.22);font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;pointer-events:auto;}' +
+    '.ges-pies-tooltip *{box-sizing:border-box;}' +
+    '.ges-pies-tooltip .gp-title{font-size:16px;font-weight:700;overflow-wrap:anywhere;}' +
+    '.ges-pies-tooltip .gp-muted{font-size:11px;color:#697b87;}' +
+    '.ges-pies-tooltip .gp-summary{padding:10px 0;border-bottom:1px solid #e4eaf0;}' +
+    '.ges-pies-tooltip .gp-stock{padding:9px 0;border-bottom:1px solid #eef2f5;}' +
+    '.ges-pies-tooltip .gp-row{display:flex;justify-content:space-between;gap:8px;align-items:baseline;}' +
+    '.ges-pies-tooltip .gp-code{font-size:11px;font-weight:650;overflow-wrap:anywhere;min-width:0;}' +
+    '.ges-pies-tooltip .gp-track{display:flex;height:10px;background:#e9eef2;border-radius:4px;overflow:hidden;margin:5px 0;}' +
+    '.ges-pies-tooltip .gp-in{background:#6895af;flex:none;}' +
+    '.ges-pies-tooltip .gp-out{background:#d77a52;flex:none;}' +
+    '.ges-pies-tooltip .gp-key{display:inline-block;width:9px;height:9px;margin-right:4px;}' +
+    '</style>';
+  const safe = value => String(value == null ? '' : value).replace(/[&<>"']/g,
+    character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
+  const isNumber = value => typeof value === 'number' && Number.isFinite(value);
+  const fmt = value => isNumber(value) ? value.toLocaleString('en-GB', {
+    maximumFractionDigits:0
+  }) : 'Not available';
+  const pct = value => isNumber(value) ? value.toFixed(1) + '%' : 'Not available';
+  const build = function(data) {
+    let html = '<div class="gp-title">' + safe(data.guild) + '</div>' +
+      '<div class="gp-muted">' + safe(data.indicator) + ' | ' + safe(data.status) + '</div>' +
+      '<div class="gp-summary"><b>' + fmt(data.inside_t) + ' t in ecoregion</b> (' + pct(data.pct) + ' of guild)' +
+      '<div class="gp-muted">' + safe(data.n_stocks) + ' stocks in slice; ' +
+      safe(data.excluded_stocks) + ' excluded from guild' +
+      '<br>No landings share available: ' + safe(data.excluded_share_unavailable) +
+      '<br>No positive catch/landings (zero, missing or invalid quantity): ' +
+      safe(data.excluded_no_positive_quantity) + '</div></div>' +
+      '<div class="gp-muted" style="margin-top:9px"><i class="gp-key gp-in"></i>Inside ecoregion ' +
+      '<i class="gp-key gp-out"></i>Outside ecoregion</div>';
+    (Array.isArray(data.stocks) ? data.stocks : []).forEach(function(stock) {
+      const knownOutside = isNumber(stock.outside_t) && stock.outside_t >= 0;
+      const total = knownOutside ? stock.inside_t + stock.outside_t : null;
+      const insidePct = isNumber(total) && total > 0 ? 100 * stock.inside_t / total : null;
+      const outsidePct = insidePct === null ? null : 100 - insidePct;
+      const bar = insidePct === null ? '<div class="gp-track"></div>' :
+        '<div class="gp-track" role="img" aria-label="' + pct(insidePct) + ' inside; ' + pct(outsidePct) + ' outside">' +
+        '<div class="gp-in" style="width:' + insidePct + '%"></div>' +
+        '<div class="gp-out" style="width:' + outsidePct + '%"></div></div>';
+      html += '<div class="gp-stock"><div class="gp-row"><span class="gp-code">' + safe(stock.stock) +
+        '</span><span class="gp-muted" style="white-space:nowrap">' + pct(stock.slice_pct) + ' of slice</span></div>' +
+        bar + '<div class="gp-muted">' + safe(stock.source) + ' inside: ' + fmt(stock.inside_t) + ' t (' + pct(insidePct) + ')' +
+        '<br>Outside: ' + (knownOutside ? fmt(stock.outside_t) + ' t (' + pct(outsidePct) + ')' : 'Not available') + '</div></div>';
+    });
+    if (data.additional_stocks > 0) html += '<div class="gp-muted">... and ' + safe(data.additional_stocks) + ' more stocks</div>';
+    return html;
+  };
+  return {tooltip, build};
+}
+)---"
+  add_html_hover(p, renderer)
 }
 
 
@@ -1338,3 +1570,559 @@ plot_kobe_app_plotly_v3 <- function(
   )
 }
 
+
+
+
+
+
+##### Discards plot
+
+
+
+plot_discard_trends_app_plotly_v3 <- function(
+    x, year, return_data = FALSE, ecoregion = NULL,
+    complete_pairs = TRUE,
+    width_px = 800, max_hover_stocks = 20
+) {
+  # Expects ecoregion-adjusted quantities in x, e.g. values multiplied by
+  # a stock-specific ShareLandingsInEcoregion. Regional landings/discards
+  # are required. Original Landings/Catches and regional catches are
+  # optional; if present they quantify the extent of excluded data.
+  #
+  # complete_pairs = TRUE: only stocks with BOTH landings and discards
+  # contribute to the guild-year numerator/denominator.
+  # complete_pairs = FALSE: independently sum available landings/discards,
+  # matching the original function's na.rm = TRUE treatment. A stock is
+  # excluded only when BOTH landings and discards are missing.
+  #
+  # The returned data (return_data = TRUE) has one row per plotted guild-year,
+  # including all coverage/exclusion metrics and the structured stock breakdown.
+  # The HTML tooltip is drawn in the browser by htmlwidgets::onRender().
+
+  required <- c("Year", "StockKeyLabel", "FisheriesGuild",
+                "Landings_ecoregion", "Discards_ecoregion")
+  missing <- setdiff(required, names(x))
+  if (length(missing)) {
+    stop("Missing columns in x: ", paste(missing, collapse = ", "))
+  }
+  if (!is.logical(complete_pairs) || length(complete_pairs) != 1L ||
+      is.na(complete_pairs)) {
+    stop("complete_pairs must be TRUE or FALSE.")
+  }
+  if (!is.logical(return_data) || length(return_data) != 1L ||
+      is.na(return_data)) {
+    stop("return_data must be TRUE or FALSE.")
+  }
+  if (!is.numeric(year) || length(year) != 1L || !is.finite(year) ||
+      year <= 2011 || year != floor(year)) {
+    stop("year must be one integer-valued year greater than 2011.")
+  }
+  if (!is.numeric(max_hover_stocks) || length(max_hover_stocks) != 1L ||
+      !is.finite(max_hover_stocks) || max_hover_stocks < 1) {
+    stop("max_hover_stocks must be a positive number.")
+  }
+  if (!is.numeric(width_px) || length(width_px) != 1L ||
+      !is.finite(width_px) || width_px <= 0) width_px <- 800
+
+  max_hover_stocks <- as.integer(max_hover_stocks)
+
+  to_number <- function(z) suppressWarnings(as.numeric(as.character(z)))
+  clean_nonnegative <- function(z) {
+    z <- to_number(z)
+    z[!is.finite(z) | z < 0] <- NA_real_
+    z
+  }
+  escape_html <- function(z) {
+    z <- gsub("&", "&amp;", z, fixed = TRUE)
+    z <- gsub("<", "&lt;", z, fixed = TRUE)
+    gsub(">", "&gt;", z, fixed = TRUE)
+  }
+  format_tonnes <- function(z) {
+    out <- format(round(z, 1), big.mark = ",",
+                  scientific = FALSE, trim = TRUE)
+    out[is.na(z)] <- "not available"
+    out
+  }
+  # Do not print '0' for an excluded group in which every value is missing.
+  # With no excluded stocks the known excluded total is genuinely zero,
+  # provided the corresponding column exists.
+  known_total <- function(z) {
+    if (length(z) == 0L) return(0)
+    if (all(is.na(z))) return(NA_real_)
+    sum(z, na.rm = TRUE)
+  }
+  display_thousand <- function(z) {
+    if (is.na(z)) "not available" else
+      paste0(format_tonnes(z / 1000), " thousand t")
+  }
+  display_percent <- function(z) {
+    ifelse(is.na(z), "not available", sprintf("%.1f%%", z))
+  }
+
+  # Stock-level quantities for the genuine HTML/CSS stacked bars.
+  # Each segment's width is a percentage of included guild (L + D),
+  # not a percentage of the individual stock. Missing values are kept
+  # missing in labels rather than silently represented as observed zeros.
+  build_stock_breakdown <- function(stock_ids, landings, discards) {
+    known_L <- dplyr::coalesce(landings, 0)
+    known_D <- dplyr::coalesce(discards, 0)
+    amount <- known_L + known_D
+    positive <- which(amount > 0)
+    if (!length(positive)) {
+      return(list(stocks = list(), n_more = 0L))
+    }
+    ord <- positive[order(amount[positive], decreasing = TRUE)]
+    shown <- utils::head(ord, max_hover_stocks)
+    total <- sum(amount[positive])
+
+    stocks <- lapply(shown, function(i) {
+      list(
+        stock = as.character(stock_ids[i]),
+        landings_t = as.numeric(landings[i]),
+        discards_t = as.numeric(discards[i]),
+        # All widths have the same guild-year denominator.
+        landings_share_pct = 100 * known_L[i] / total,
+        discards_share_pct = 100 * known_D[i] / total,
+        share_pct = 100 * amount[i] / total,
+        rate_pct = if (is.na(landings[i]) || is.na(discards[i])) {
+          NA_real_
+        } else {
+          100 * discards[i] / amount[i]
+        }
+      )
+    })
+    list(stocks = stocks, n_more = length(ord) - length(shown))
+  }
+
+  # Catch and original quantity columns are optional because earlier
+  # versions of this function did not require them. Report each separately
+  # to avoid conflating full-stock and regional quantities.
+  catch_col <- if ("Catches_ecoregion" %in% names(x)) {
+    "Catches_ecoregion"
+  } else if ("Catches_ecoregion_est" %in% names(x)) {
+    "Catches_ecoregion_est"
+  } else {
+    NULL
+  }
+  catch_values <- if (is.null(catch_col)) {
+    rep(NA_real_, nrow(x))
+  } else {
+    clean_nonnegative(x[[catch_col]])
+  }
+  original_landings <- if ("Landings" %in% names(x)) {
+    clean_nonnegative(x[["Landings"]])
+  } else {
+    rep(NA_real_, nrow(x))
+  }
+  original_catches <- if ("Catches" %in% names(x)) {
+    clean_nonnegative(x[["Catches"]])
+  } else {
+    rep(NA_real_, nrow(x))
+  }
+
+  # One observation per stock-year; no rowid_to_column/spread/gather joins.
+  df_all <- x |>
+    dplyr::transmute(
+      Year = to_number(Year),
+      StockKeyLabel = as.character(StockKeyLabel),
+      FisheriesGuild = as.character(FisheriesGuild),
+      Landings_ecoregion = clean_nonnegative(Landings_ecoregion),
+      Discards_ecoregion = clean_nonnegative(Discards_ecoregion),
+      Catches_ecoregion = catch_values,
+      Landings_original = original_landings,
+      Catches_original = original_catches
+    ) |>
+    dplyr::filter(
+      is.finite(Year), Year == floor(Year),
+      Year >= 2011, Year < year,
+      !is.na(StockKeyLabel), nzchar(StockKeyLabel),
+      !is.na(FisheriesGuild), nzchar(FisheriesGuild)
+    ) |>
+    dplyr::distinct()
+
+  repeated <- df_all |>
+    dplyr::count(Year, StockKeyLabel, name = "n") |>
+    dplyr::filter(n > 1L)
+  if (nrow(repeated)) {
+    stop(
+      "Multiple distinct records for the same stock and year: ",
+      paste(utils::head(repeated$StockKeyLabel, 8L), collapse = ", "),
+      ". Resolve these before plotting to avoid double counting."
+    )
+  }
+
+  df_all <- df_all |>
+    dplyr::mutate(
+      usable = if (complete_pairs) {
+        !is.na(Landings_ecoregion) & !is.na(Discards_ecoregion)
+      } else {
+        !is.na(Landings_ecoregion) | !is.na(Discards_ecoregion)
+      }
+    )
+
+  # Denominator/data coverage and excluded known regional quantities.
+  # Missing excluded values stay missing: excluded totals are *known* totals,
+  # not estimates of the unknown quantities.
+  coverage <- df_all |>
+    dplyr::group_by(Year, FisheriesGuild) |>
+    dplyr::summarise(
+      n_available = dplyr::n(),
+      n_included = sum(usable),
+      n_excluded = sum(!usable),
+      n_included_missing_landings = sum(usable & is.na(Landings_ecoregion)),
+      n_included_missing_discards = sum(usable & is.na(Discards_ecoregion)),
+      n_excluded_missing_landings = sum(!usable & is.na(Landings_ecoregion)),
+      n_excluded_missing_catches = sum(!usable & is.na(Catches_ecoregion)),
+      n_excluded_missing_original_landings =
+        sum(!usable & is.na(Landings_original)),
+      n_excluded_missing_original_catches =
+        sum(!usable & is.na(Catches_original)),
+      excluded_landings_original_t = known_total(Landings_original[!usable]),
+      excluded_catches_original_t = known_total(Catches_original[!usable]),
+      excluded_landings_ecoregion_t =
+        known_total(Landings_ecoregion[!usable]),
+      excluded_catches_ecoregion_t =
+        known_total(Catches_ecoregion[!usable]),
+      # Denominator includes all KNOWN regional landings in this guild/year,
+      # whether included in the discard-rate calculation or excluded.
+      # Unknown regional landings are not implicitly counted as zero.
+      known_landings_ecoregion_t =
+        sum(Landings_ecoregion, na.rm = TRUE),
+      n_missing_landings_ecoregion = sum(is.na(Landings_ecoregion)),
+      excluded_share_known_landings_pct = {
+        known <- Landings_ecoregion[!is.na(Landings_ecoregion)]
+        if (!length(known) || sum(known) <= 0) {
+          NA_real_
+        } else {
+          100 * sum(Landings_ecoregion[!usable], na.rm = TRUE) / sum(known)
+        }
+      },
+      .groups = "drop"
+    )
+
+  # In non-paired mode, sums are calculated independently, as in v1.
+  included <- df_all |>
+    dplyr::filter(usable)
+
+  df5 <- included |>
+    dplyr::group_by(Year, FisheriesGuild) |>
+    dplyr::summarise(
+      guildLandings = sum(Landings_ecoregion, na.rm = TRUE) / 1000,
+      guildDiscards = sum(Discards_ecoregion, na.rm = TRUE) / 1000,
+      n_stocks = sum(dplyr::coalesce(Landings_ecoregion, 0) +
+                       dplyr::coalesce(Discards_ecoregion, 0) > 0),
+      stock_breakdown = list(build_stock_breakdown(
+        StockKeyLabel, Landings_ecoregion, Discards_ecoregion
+      )),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      guildRate = dplyr::if_else(
+        guildLandings + guildDiscards > 0,
+        guildDiscards / (guildLandings + guildDiscards),
+        NA_real_
+      )
+    ) |>
+    dplyr::filter(!is.na(guildRate)) |>
+    dplyr::left_join(
+      coverage, by = c("Year", "FisheriesGuild"),
+      relationship = "one-to-one"
+    ) |>
+    dplyr::arrange(FisheriesGuild, Year)
+
+  if (nrow(df5)) {
+    method_label <- if (complete_pairs) {
+      "Paired stocks only"
+    } else {
+      "Independent available values (v1 method)"
+    }
+    df5 <- df5 |>
+      dplyr::mutate(
+        hover_text = paste0(
+          "<b>", escape_html(FisheriesGuild), " — ", Year, "</b>",
+          "<br>Estimated ecoregion discard rate: ",
+          scales::percent(guildRate, accuracy = 0.01),
+          "<br>Landings: ", format_tonnes(guildLandings), " thousand t",
+          " | Discards: ", format_tonnes(guildDiscards), " thousand t",
+          "<br>Method: ", method_label,
+          "<br>Included stocks: ", n_included, " of ", n_available,
+          " (", n_excluded, " excluded)",
+          "<br>Excluded share of known ecoregion landings: ",
+          display_percent(excluded_share_known_landings_pct)
+        )
+      )
+
+    # Each plotted point carries its data as JSON, not pre-rendered HTML.
+    # This is also part of the return_data output for reproducibility.
+    df5$hover_payload <- vapply(seq_len(nrow(df5)), function(i) {
+      d <- df5[i, , drop = FALSE]
+      jsonlite::toJSON(
+        list(
+          guild = d$FisheriesGuild[[1]],
+          year = as.integer(d$Year[[1]]),
+          discard_rate_pct = 100 * d$guildRate[[1]],
+          landings_kt = d$guildLandings[[1]],
+          discards_kt = d$guildDiscards[[1]],
+          method = method_label,
+          n_available = as.integer(d$n_available[[1]]),
+          n_included = as.integer(d$n_included[[1]]),
+          n_excluded = as.integer(d$n_excluded[[1]]),
+          excluded_share_known_landings_pct =
+            d$excluded_share_known_landings_pct[[1]],
+          n_missing_landings_ecoregion =
+            as.integer(d$n_missing_landings_ecoregion[[1]]),
+          stocks = d$stock_breakdown[[1]]$stocks,
+          additional_stocks = as.integer(d$stock_breakdown[[1]]$n_more)
+        ),
+        auto_unbox = TRUE,
+        na = "null",
+        null = "null",
+        digits = 12
+      ) |> as.character()
+    }, character(1))
+  } else {
+    df5$hover_text <- character(0)
+    df5$hover_payload <- character(0)
+  }
+
+  # Absolutely no Plotly calls if the caller only wants the plotted data.
+  if (isTRUE(return_data)) return(df5)
+
+  if (!nrow(df5)) {
+    return(plotly::plot_ly() |>
+      plotly::layout(
+        xaxis = list(visible = FALSE),
+        yaxis = list(visible = FALSE),
+        annotations = list(list(
+          text = "No usable regional landings and discards available",
+          x = 0.5, y = 0.5, xref = "paper", yref = "paper",
+          showarrow = FALSE
+        ))
+      ))
+  }
+
+  # Stable guild-specific colours.
+  guild_colours <- c(
+    benthic = "#0072B2",
+    demersal = "#E69F00",
+    elasmobranch = "#009E73",
+    pelagic = "#CC79A7",
+    shellfish = "#D55E00"
+  )
+  guilds <- sort(unique(df5$FisheriesGuild))
+  other_guilds <- setdiff(guilds, names(guild_colours))
+  if (length(other_guilds)) {
+    guild_colours <- c(
+      guild_colours,
+      stats::setNames(
+        grDevices::hcl.colors(length(other_guilds), palette = "Dark 3"),
+        other_guilds
+      )
+    )
+  }
+
+  tick_size <- max(9, min(16, round(width_px / 55)))
+  axis_title_size <- max(10, min(20, round(width_px / 50)))
+  title_size <- max(12, min(22, round(width_px / 40)))
+  caption_size <- max(8, min(14, round(width_px / 70)))
+
+  p <- plotly::plot_ly()
+  for (guild in guilds) {
+    sub <- df5 |>
+      dplyr::filter(FisheriesGuild == guild) |>
+      tidyr::complete(Year = seq.int(2011, year - 1)) |>
+      dplyr::arrange(Year)
+
+    p <- plotly::add_trace(
+      p, data = sub,
+      x = ~Year, y = ~guildRate,
+      type = "scatter", mode = "lines+markers",
+      name = guild, showlegend = TRUE,
+      line = list(color = unname(guild_colours[guild]), width = 3),
+      marker = list(color = unname(guild_colours[guild]), size = 5),
+      customdata = ~hover_payload,
+      # 'none' hides native Plotly hover labels but preserves hover events.
+      hoverinfo = "none",
+      connectgaps = FALSE,
+      inherit = FALSE
+    )
+  }
+
+  region_title <- if (is.null(ecoregion) || !nzchar(as.character(ecoregion))) {
+    "Discard trends"
+  } else {
+    paste0("Discard trends (", ecoregion, ")")
+  }
+
+  p <- plotly::layout(
+    p,
+    hovermode = "closest",
+    xaxis = list(
+      title = list(text = "Year", font = list(size = axis_title_size)),
+      dtick = 1, tickfont = list(size = tick_size)
+    ),
+    yaxis = list(
+      title = list(text = "Discard rate", font = list(size = axis_title_size)),
+      tickformat = ".1%", rangemode = "tozero",
+      tickfont = list(size = tick_size)
+    ),
+    legend = list(title = list(text = "<b>Fisheries guild:</b>")),
+    margin = list(l = 75, r = 30, t = 65, b = 115),
+    annotations = list(
+      list(
+        text = region_title, x = 0.01, y = 1.08,
+        xref = "paper", yref = "paper", showarrow = FALSE,
+        xanchor = "left", yanchor = "top",
+        font = list(size = title_size, color = "black")
+      ),
+      list(
+        text = paste0("ICES Stock Assessment Database, ",
+                      format(Sys.Date(), "%d-%b-%y"), ". ICES, Copenhagen<br>",
+                      "Ecoregion estimates calculated from recent spatial shares derived from RDBES"),
+        x = 1, y = -0.24, xref = "paper", yref = "paper",
+        xanchor = "right", yanchor = "top", showarrow = FALSE,
+        font = list(size = caption_size)
+      )
+    )
+  )
+
+  p <- plotly::config(
+    p, responsive = TRUE,
+    toImageButtonOptions = list(
+      filename = paste0(
+        if (is.null(ecoregion)) "Ecoregion" else ecoregion,
+        "_DiscardTrends_", format(Sys.Date(), "%d-%b-%y")
+      ),
+      format = "png", scale = 3
+    )
+   )
+
+  # Real HTML tooltip: safely render escaped labels and coloured CSS bars.
+  # htmlwidgets::onRender runs in the browser after Plotly is drawn.
+  js <- r"---(
+function(el, x) {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'discard-v3-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.style.display = 'none';
+  tooltip.innerHTML = '<style>' +
+    '.discard-v3-tooltip{position:fixed;z-index:2147483000;width:400px;max-width:calc(100vw - 20px);max-height:calc(100vh - 20px);overflow-y:auto;box-sizing:border-box;padding:15px 16px;background:#fff;color:#243746;border:1px solid #d8e2ea;border-radius:12px;box-shadow:0 10px 32px rgba(15,33,45,.22);font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;pointer-events:auto;}' +
+    '.discard-v3-tooltip *{box-sizing:border-box;}' +
+    '.discard-v3-tooltip .dv3-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;}' +
+    '.discard-v3-tooltip .dv3-guild{font-size:16px;font-weight:700;line-height:1.2;}' +
+    '.discard-v3-tooltip .dv3-muted{color:#697b87;font-size:11px;}' +
+    '.discard-v3-tooltip .dv3-rate{text-align:right;white-space:nowrap;font-size:21px;font-weight:750;color:#17354c;line-height:1.15;}' +
+    '.discard-v3-tooltip .dv3-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0;}' +
+    '.discard-v3-tooltip .dv3-number{font-size:16px;font-weight:650;color:#203d51;}' +
+    '.discard-v3-tooltip .dv3-rule{height:1px;background:#e4eaf0;margin:12px 0;}' +
+    '.discard-v3-tooltip .dv3-coverage{background:#f2f6f9;border-radius:8px;padding:11px;}' +
+    '.discard-v3-tooltip .dv3-row{display:flex;justify-content:space-between;align-items:baseline;gap:8px;}' +
+    '.discard-v3-tooltip .dv3-section{font-size:12px;font-weight:700;margin-bottom:6px;}' +
+    '.discard-v3-tooltip .dv3-track{display:flex;width:100%;height:10px;background:#e9eef2;border-radius:4px;overflow:hidden;}' +
+    '.discard-v3-tooltip .dv3-track-coverage{margin-top:8px;height:11px;background:#e9eef2;}' +
+    '.discard-v3-tooltip .dv3-coverage-included{height:100%;background:#398b71;flex:none;}' +
+    '.discard-v3-tooltip .dv3-coverage-excluded{height:100%;background:#ce805a;flex:none;}' +
+    '.discard-v3-tooltip .dv3-coverage-labels{display:flex;justify-content:space-between;gap:8px;margin-top:5px;font-size:11px;color:#697b87;}' +
+    '.discard-v3-tooltip .dv3-L{height:100%;background:#6895af;}' +
+    '.discard-v3-tooltip .dv3-D{height:100%;background:#d77a52;}' +
+    '.discard-v3-tooltip .dv3-stock{padding:7px 0;border-bottom:1px solid #eef2f5;}' +
+    '.discard-v3-tooltip .dv3-stock:last-child{border-bottom:0;}' +
+    '.discard-v3-tooltip .dv3-code{font-size:11px;font-weight:650;overflow-wrap:anywhere;}' +
+    '.discard-v3-tooltip .dv3-details{font-size:10.5px;color:#687b86;margin-top:3px;}' +
+    '.discard-v3-tooltip .dv3-legend{display:flex;gap:10px;align-items:center;font-size:10.5px;color:#6b7b85;}' +
+    '.discard-v3-tooltip .dv3-key{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;}' +
+    '</style>';
+  const safe = function(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function(c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  };
+  const isNumber = function(z) {
+    return typeof z === 'number' && Number.isFinite(z);
+  };
+  const fmt = function(z, digits) {
+    return isNumber(z) ? z.toLocaleString('en-GB', {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits
+    }) : 'NA';
+  };
+  const pct = function(z, digits) {
+    return isNumber(z) ? fmt(z, digits) + '%' : 'Not available';
+  };
+  const clamp = function(z) {
+    return isNumber(z) ? Math.max(0, Math.min(100, z)) : 0;
+  };
+
+  const build = function(d) {
+    const method = d.method === 'Paired stocks only' ?
+      'Paired stocks only' : 'Independent available values';
+
+    // Percentages refer only to regional landings with known values.
+    // A missing percentage is NOT equivalent to 0% excluded / 100% included.
+    const excludedKnownPct = isNumber(d.excluded_share_known_landings_pct) ?
+      clamp(d.excluded_share_known_landings_pct) : null;
+    const includedKnownPct = excludedKnownPct === null ?
+      null : 100 - excludedKnownPct;
+    const coverageBar = excludedKnownPct === null ?
+      '<div class="dv3-track dv3-track-coverage"></div>' +
+      '<div class="dv3-coverage-labels"><span>Share unavailable: no positive known regional landings</span></div>' :
+      '<div class="dv3-track dv3-track-coverage" role="img" aria-label="' +
+      pct(includedKnownPct, 1) + ' of known regional landings included; ' +
+      pct(excludedKnownPct, 1) + ' excluded">' +
+      '<div class="dv3-coverage-included" style="width:' + includedKnownPct + '%"></div>' +
+      '<div class="dv3-coverage-excluded" style="width:' + excludedKnownPct + '%"></div></div>' +
+      '<div class="dv3-coverage-labels"><span>' + pct(includedKnownPct, 1) +
+      ' included</span><span>' + pct(excludedKnownPct, 1) + ' excluded</span></div>';
+
+    let html = '<div class="dv3-head">' +
+      '<div><div class="dv3-guild">' + safe(d.guild) + '</div>' +
+      '<div class="dv3-muted">' + safe(d.year) + ' · Estimated regional quantities</div></div>' +
+      '<div><div class="dv3-rate">' + pct(d.discard_rate_pct, 2) + '</div>' +
+      '<div class="dv3-muted" style="text-align:right">Discard rate</div></div></div>' +
+      '<div class="dv3-grid">' +
+      '<div><div class="dv3-muted">Landings</div><div class="dv3-number">' + fmt(d.landings_kt, 2) + ' kt</div></div>' +
+      '<div><div class="dv3-muted">Discards</div><div class="dv3-number">' + fmt(d.discards_kt, 2) + ' kt</div></div></div>' +
+      '<div class="dv3-muted">Method: ' + safe(method) + '</div>' +
+      '<div class="dv3-rule"></div>' +
+      '<div class="dv3-coverage"><div class="dv3-row"><span class="dv3-section">Data coverage</span>' +
+      '<b>' + safe(d.n_included) + ' / ' + safe(d.n_available) + ' stocks</b></div>' +
+      '<div class="dv3-row dv3-muted"><span>Excluded share of known regional landings</span>' +
+      '<b>' + pct(d.excluded_share_known_landings_pct, 1) + '</b></div>' +
+      coverageBar +
+      '<div class="dv3-muted" style="margin-top:7px">' + safe(d.n_excluded) + ' excluded stock(s)' +
+      (d.n_missing_landings_ecoregion > 0 ? '; regional landings unknown for ' +
+        safe(d.n_missing_landings_ecoregion) + ' stock(s)' : '') + '</div></div>' +
+      '<div class="dv3-rule"></div>' +
+      '<div class="dv3-row" style="align-items:center"><span class="dv3-section">Included stock composition</span>' +
+      '<span class="dv3-legend"><span><i class="dv3-key dv3-L"></i>Landings</span>' +
+      '<span><i class="dv3-key dv3-D"></i>Discards</span></span></div>' +
+      '<div class="dv3-muted" style="margin-bottom:4px">Bar length = share of included guild landings + discards</div>';
+
+    if (!Array.isArray(d.stocks) || d.stocks.length === 0) {
+      html += '<div class="dv3-muted">No positive stock quantities</div>';
+    } else {
+      d.stocks.forEach(function(s) {
+        html += '<div class="dv3-stock"><div class="dv3-row">' +
+          '<span class="dv3-code">' + safe(s.stock) + '</span>' +
+          '<span class="dv3-muted" style="white-space:nowrap">' + pct(s.share_pct, 1) + ' of guild</span></div>' +
+          '<div class="dv3-track" style="margin-top:5px">' +
+          '<div class="dv3-L" style="width:' + clamp(s.landings_share_pct) + '%"></div>' +
+          '<div class="dv3-D" style="width:' + clamp(s.discards_share_pct) + '%"></div></div>' +
+          '<div class="dv3-details">L: ' + fmt(s.landings_t, 0) + ' t  ·  D: ' +
+          fmt(s.discards_t, 0) + ' t  ·  Stock discard rate: ' +
+          (isNumber(s.rate_pct) ? pct(s.rate_pct, 1) : 'NA (incomplete)') + '</div></div>';
+      });
+    }
+    if (d.additional_stocks > 0) {
+      html += '<div class="dv3-muted" style="margin-top:7px">... and ' +
+        safe(d.additional_stocks) + ' more stocks</div>';
+    }
+    return html;
+  };
+
+  return {tooltip, build};
+}
+)---"
+
+  add_html_hover(p, js)
+}
