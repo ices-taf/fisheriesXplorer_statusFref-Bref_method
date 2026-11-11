@@ -83,6 +83,7 @@ export_dir <- "report/html_plots"
 dir.create(export_dir, recursive = TRUE, showWarnings = FALSE)
 kobe_guilds <- c("benthic", "demersal", "elasmobranch", "pelagic", "shellfish",
                  "all_stocks")
+trend_guilds <- c(setdiff(kobe_guilds, "all_stocks"), "all_guilds")
 expected_plot_index <- expand.grid(
   plot_type = c("stock_summary", "ges", "discards"),
   ecoregion_id = vapply(ecoregions, get_ecoregion_acronym, character(1)),
@@ -95,6 +96,12 @@ expected_plot_index <- bind_rows(
     plot_type = "kobe",
     ecoregion_id = vapply(ecoregions, get_ecoregion_acronym, character(1)),
     guild_id = kobe_guilds,
+    stringsAsFactors = FALSE
+  ),
+  expand.grid(
+    plot_type = "status_trends",
+    ecoregion_id = vapply(ecoregions, get_ecoregion_acronym, character(1)),
+    guild_id = trend_guilds,
     stringsAsFactors = FALSE
   )
 )
@@ -238,6 +245,25 @@ tryCatch(for (region in ecoregions) {
         stop_plot_no_data(paste0("No stocks for fisheries guild: ", guild))
       }
       plot_kobe_app_plotly_v3(regional_current, guild = plot_guild)
+    }, guild_id = guild)
+  }
+  for (guild in trend_guilds) {
+    save_plot_export("status_trends", code, function() {
+      trend_data <- prepare_status_trend_data(regional_annual)
+      plot_guild <- if (identical(guild, "all_guilds")) "All" else guild
+      available <- if (identical(plot_guild, "All")) {
+        trend_data %>%
+          filter(StockKeyLabel == "Mean") %>%
+          group_by(FisheriesGuild, Metric) %>%
+          filter(Year < max(Year)) %>%
+          ungroup()
+      } else {
+        filter(trend_data, FisheriesGuild == plot_guild, StockKeyLabel != "Mean")
+      }
+      if (!nrow(available)) {
+        stop_plot_no_data(paste0("No usable annual status trends for: ", guild))
+      }
+      plot_stock_trends(trend_data, guild = plot_guild, ecoregion = region)
     }, guild_id = guild)
   }
 }, error = function(error) {
