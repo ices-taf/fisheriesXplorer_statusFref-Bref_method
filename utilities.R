@@ -105,7 +105,8 @@ audit_sag_reference_points <- function(sag_formatted, sag_settings) {
     StockKeyLabel = optional_col("StockKeyLabel"),
     FisheriesGuild = optional_col("FisheriesGuild"),
     AssessmentYear = optional_col("AssessmentYear"),
-    Year = optional_col("Year")
+    Year = optional_col("Year"),
+    StockSize = to_num(optional_col("StockSize"))
   )
 
   settings <- sag_settings |>
@@ -375,7 +376,7 @@ audit_sag_reference_points <- function(sag_formatted, sag_settings) {
     candidates = candidates |>
       dplyr::select(
         .audit_row_id, AssessmentKey, StockKeyLabel, FisheriesGuild,
-        AssessmentYear, Year, Indicator, source, reference_field, reference_name,
+        AssessmentYear, Year, StockSize, Indicator, source, reference_field, reference_name,
         custom_index, SAGChartKey, setting_selected, value,
         valid_positive, considered_in_v2, selected_in_v2, audit_note
       ),
@@ -403,15 +404,55 @@ audit_sag_reference_points <- function(sag_formatted, sag_settings) {
 
 
 
+# Select the current B observation and its reference from the same assessment row.
+# Prefer the latest usable pair in the latest assessment, up to its assessment year.
+# If every biomass observation is unavailable/invalid, retain the latest known
+# positive reference so its name and provenance can accompany a GREY status.
+select_current_biomass_row <- function(x, reference_column) {
+  to_num <- function(z) suppressWarnings(as.numeric(as.character(z)))
+  original_columns <- names(x)
+
+  x |>
+    dplyr::mutate(
+      .B_year = to_num(Year),
+      .B_assessment_year = to_num(AssessmentYear),
+      .B_stock_size = to_num(StockSize),
+      .B_reference = to_num(.data[[reference_column]])
+    ) |>
+    dplyr::group_by(StockKeyLabel) |>
+    dplyr::mutate(
+      .B_latest_assessment = if (all(!is.finite(.B_assessment_year))) {
+        NA_real_
+      } else {
+        max(.B_assessment_year[is.finite(.B_assessment_year)])
+      }
+    ) |>
+    dplyr::filter(
+      is.finite(.B_latest_assessment),
+      .B_assessment_year == .B_latest_assessment,
+      is.finite(.B_year), .B_year <= .B_latest_assessment,
+      is.finite(.B_reference), .B_reference > 0
+    ) |>
+    dplyr::mutate(
+      .B_usable = is.finite(.B_stock_size) & .B_stock_size >= 0 &
+        is.finite(.B_stock_size / .B_reference)
+    ) |>
+    dplyr::arrange(StockKeyLabel, dplyr::desc(.B_usable), dplyr::desc(.B_year)) |>
+    dplyr::slice_head(n = 1L) |>
+    dplyr::ungroup() |>
+    dplyr::select(dplyr::all_of(original_columns))
+}
+
+
 #' Reduce the audit to ONE ROW PER STOCK, following the intended year rules
 #' in stockstatus_CLD_current_proxy(): F from assessment year - 1; B from
-#' assessment year or -1, preferring the latest available positive B reference.
+#' the latest usable biomass/reference pair in the latest assessment.
 #' This is for provenance review, not a replacement for stockstatus.
 #' @noRd
 audit_sag_refpoints_by_stock <- function(audit) {
   d <- audit$selected
   needed <- c("StockKeyLabel", "FisheriesGuild", "AssessmentYear", "Year",
-              "Fref_value", "Bref_value")
+              "StockSize", "Fref_value", "Bref_value")
   missing <- setdiff(needed, names(d))
   if (length(missing)) stop("Audit selected table lacks: ", paste(missing, collapse = ", "))
 
@@ -448,16 +489,7 @@ audit_sag_refpoints_by_stock <- function(audit) {
       Fref_candidates = Fref_candidate_list
     )
 
-  b <- d |>
-    dplyr::filter(
-      is.finite(.AY_latest),
-      .year_num == .AY_latest | .year_num == .AY_latest - 1,
-      is.finite(Bref_value), Bref_value > 0
-    ) |>
-    dplyr::arrange(StockKeyLabel, dplyr::desc(.year_num)) |>
-    dplyr::group_by(StockKeyLabel) |>
-    dplyr::slice_head(n = 1L) |>
-    dplyr::ungroup() |>
+  b <- select_current_biomass_row(d, "Bref_value") |>
     dplyr::transmute(
       StockKeyLabel, FisheriesGuild,
       B_AssessmentKey = AssessmentKey,
@@ -1046,18 +1078,33 @@ add_proxyRefPoints_v3 <- function(
     dplyr::mutate(
       .AY_latest = if (all(!is.finite(.AY))) NA_real_ else max(.AY[is.finite(.AY)])
     ) |>
-    dplyr::ungroup() |>
+    dplyr::ungroup()
+
+  # Review the potential current B year, including pending candidates.
+  # This covers a fallback without bringing unrelated historical years into
+  # the current-status review or silently skipping a newer unreviewed pair.
+  b_review_years <- current_check |>
+    dplyr::filter(
+      Indicator == "Bref", .AY == .AY_latest, chart_compatible,
+      eligibility %in% c("Eligible", "Unreviewed", "Review pending")
+    ) |>
+    select_current_biomass_row("value") |>
+    dplyr::transmute(StockKeyLabel, .B_review_year = .Y)
+
+  current_check <- current_check |>
+    dplyr::left_join(b_review_years, by = "StockKeyLabel") |>
     dplyr::filter(
       is.finite(value), value > 0,
       is.finite(.AY_latest),
       (Indicator == "Fref" & .Y == .AY_latest - 1) |
-        (Indicator == "Bref" & (.Y == .AY_latest | .Y == .AY_latest - 1))
+        (Indicator == "Bref" & .AY == .AY_latest &
+           (.Y == .AY_latest | .Y == .AY_latest - 1 | .Y == .B_review_year))
     )
   pending_current <- current_check |>
     dplyr::filter(eligibility %in% c("Unreviewed", "Review pending"))
   if (isTRUE(strict_current_review) && nrow(pending_current)) {
     stop(nrow(pending_current),
-         " positive current-year F/B candidate record(s) are not approved ",
+         " positive current-status F/B candidate record(s) are not approved ",
          "by the policy. See return_audit with strict_current_review=FALSE ",
          "to inspect them.")
   }
@@ -1131,7 +1178,7 @@ add_proxyRefPoints_v3 <- function(
   # stock-level provenance extraction possible without a new summariser.
   base_rows <- audit$selected |>
     dplyr::select(.audit_row_id, AssessmentKey, StockKeyLabel,
-                  FisheriesGuild, AssessmentYear, Year)
+                  FisheriesGuild, AssessmentYear, Year, StockSize)
   selected_v3 <- base_rows |>
     dplyr::left_join(selections, by = ".audit_row_id") |>
     dplyr::left_join(listings, by = ".audit_row_id")
@@ -1266,9 +1313,7 @@ attach_refpoint_provenance_v3 <- function(stock_current, current_v3) {
     stop("Joining the provenance table changed stock row counts.")
   }
 
-  # The older stockstatus_CLD_current_proxy() uses a broad %in% filter for
-  # B-years, rather than a row-wise year comparison. Signal any disagreement
-  # between the reference value in the status table and the audited choice.
+  # Signal any disagreement between the status observation and its audit.
   differs <- function(a, b) {
     a <- suppressWarnings(as.numeric(as.character(a)))
     b <- suppressWarnings(as.numeric(as.character(b)))
@@ -1282,6 +1327,10 @@ attach_refpoint_provenance_v3 <- function(stock_current, current_v3) {
       any(differs(out$FMSY, out$Fref))) {
     warning("Some F references differ between stockstatus and v3 audit.")
   }
+  if (all(c("Year", "B_Year") %in% names(out)) &&
+      any(differs(out$Year, out$B_Year))) {
+    warning("Some B observation years differ between stockstatus and v3 audit.")
+  }
   if (all(c("MSYBtrigger", "Bref") %in% names(out)) &&
       any(differs(out$MSYBtrigger, out$Bref))) {
     warning("Some B references differ between stockstatus and v3 audit. ",
@@ -1293,9 +1342,8 @@ attach_refpoint_provenance_v3 <- function(stock_current, current_v3) {
 
 
 
-# Original downstream stock-status logic, with the confirmed B-year filter
-# corrected to compare each row against its own stock's assessment year.
-# The selection rule remains F = AY_latest - 1; B = latest eligible AY or AY-1.
+# Current stock status uses F from assessment year - 1 and the latest usable
+# biomass/reference pair within the stock's latest assessment for B.
 # Status pies and Kobe plot compute their own indicator/quadrant statuses.
 
 stockstatus_CLD_current_proxy <- function(x) {
@@ -1335,15 +1383,8 @@ stockstatus_CLD_current_proxy <- function(x) {
       F_proxy = FMSY_is_proxy, F_proxy_name = FMSY_proxy_name
     )
 
-  # ---------- B side: choose latest of AY_latest or AY_latest - 1 with MSYBtrigger ----------
-  df_B <- x %>%
-    dplyr::filter(Year == AY_latest | Year == AY_latest - 1) %>%
-    dplyr::arrange(StockKeyLabel, dplyr::desc(Year)) %>%
-    dplyr::group_by(StockKeyLabel) %>%
-    # keep the latest row that actually has MSYBtrigger
-    dplyr::filter(!is.na(MSYBtrigger)) %>%
-    dplyr::slice_head(n = 1) %>%
-    dplyr::ungroup() %>%
+  # ---------- B side: latest usable pair in the latest assessment ----------
+  df_B <- select_current_biomass_row(x, "MSYBtrigger") %>%
     dplyr::mutate(
       SSB_MSYBtrigger = ifelse(!is.na(MSYBtrigger), StockSize / MSYBtrigger, NA_real_)
     ) %>%
