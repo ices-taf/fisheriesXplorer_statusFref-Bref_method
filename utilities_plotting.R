@@ -1,6 +1,109 @@
 # Stock-count pies (six guild columns, two F/B rows).
 # Extracted from the latest utilities_GES_pies.R.
 
+add_html_hover <- function(plot, renderer) {
+  js <- r"---(
+  const {tooltip, build} = view;
+  const isNumber = value => typeof value === 'number' && Number.isFinite(value);
+  if (typeof el.__htmlHoverCleanup === 'function') el.__htmlHoverCleanup();
+  document.body.appendChild(tooltip);
+  let lastPointer = null;
+  let hideTimer = null;
+  let observer = null;
+  function cancelHide() {
+    if (hideTimer !== null) { clearTimeout(hideTimer); hideTimer = null; }
+  }
+  function hideSoon() {
+    cancelHide();
+    hideTimer = setTimeout(function() { tooltip.style.display = 'none'; }, 180);
+  }
+  function position(xPos, yPos) {
+    if (!isNumber(xPos) || !isNumber(yPos)) return;
+    const pad = 10, offset = 18;
+    const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+    let left = xPos + offset;
+    if (left + tw + pad > window.innerWidth) left = xPos - tw - offset;
+    left = Math.max(pad, Math.min(left, window.innerWidth - tw - pad));
+    let top = yPos + 12;
+    if (top + th + pad > window.innerHeight) top = window.innerHeight - th - pad;
+    top = Math.max(pad, top);
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = top + 'px';
+  }
+  function onMove(event) {
+    lastPointer = {x:event.clientX, y:event.clientY};
+    if (tooltip.style.display !== 'none') position(event.clientX, event.clientY);
+  }
+  function onHover(event) {
+    const point = event && event.points && event.points[0];
+    if (!point) return;
+    let payload = point.customdata;
+    if (payload == null && point.data && point.data.customdata) {
+      payload = point.data.customdata[point.pointNumber];
+    }
+    if (Array.isArray(payload)) payload = payload[0];
+    if (typeof payload !== 'string') { hideSoon(); return; }
+    let data;
+    try { data = JSON.parse(payload); } catch(error) { hideSoon(); return; }
+    if (!data || typeof data !== 'object') { hideSoon(); return; }
+    cancelHide();
+    tooltip.innerHTML = tooltip.querySelector('style').outerHTML + build(data);
+    tooltip.style.display = 'block';
+    const mouse = event.event && isNumber(event.event.clientX) ?
+      {x:event.event.clientX, y:event.event.clientY} : lastPointer;
+    if (mouse) position(mouse.x, mouse.y);
+  }
+  function onUnhover() { hideSoon(); }
+  function onTipEnter() { cancelHide(); }
+  function onTipLeave() { hideSoon(); }
+  tooltip.addEventListener('mouseenter', onTipEnter);
+  tooltip.addEventListener('mouseleave', onTipLeave);
+  el.addEventListener('mousemove', onMove);
+  el.on('plotly_hover', onHover);
+  el.on('plotly_unhover', onUnhover);
+  const cleanup = function() {
+    cancelHide();
+    el.removeEventListener('mousemove', onMove);
+    if (typeof el.removeListener === 'function') {
+      el.removeListener('plotly_hover', onHover);
+      el.removeListener('plotly_unhover', onUnhover);
+    }
+    tooltip.removeEventListener('mouseenter', onTipEnter);
+    tooltip.removeEventListener('mouseleave', onTipLeave);
+    if (tooltip.parentNode) tooltip.parentNode.removeChild(tooltip);
+    if (observer) observer.disconnect();
+    if (el.__htmlHoverCleanup === cleanup) delete el.__htmlHoverCleanup;
+  };
+  el.__htmlHoverCleanup = cleanup;
+  observer = new MutationObserver(function() {
+    if (!document.body.contains(el)) cleanup();
+  });
+  observer.observe(document.body, {childList:true, subtree:true});
+)---"
+  htmlwidgets::onRender(plot, paste0(
+    "function(el, x) { const view = (", renderer, ")(el, x);\n", js, "\n}"
+  ))
+}
+
+ecoregion_exclusion_reason <- function(usable, share_unavailable = FALSE) {
+  stopifnot(
+    is.logical(usable), is.logical(share_unavailable),
+    length(share_unavailable) %in% c(1L, length(usable))
+  )
+  excluded <- !usable %in% TRUE
+  reason <- rep(NA_character_, length(usable))
+  reason[excluded] <- "quantity unavailable or non-positive"
+  reason[excluded & share_unavailable %in% TRUE] <- "share unavailable"
+  reason
+}
+
+stop_plot_no_data <- function(message) {
+  stop(structure(
+    list(message = message, call = NULL),
+    class = c("plot_no_data", "error", "condition")
+  ))
+}
+
 prepare_precautionary_status_pies <- function(df) {
 
   required <- c(
@@ -33,7 +136,7 @@ prepare_precautionary_status_pies <- function(df) {
     dplyr::distinct()
 
   if (nrow(stock_df) == 0L) {
-    stop("No stocks in the supplied data.")
+    stop_plot_no_data("No stocks in the supplied data.")
   }
 
   # A stock should contribute once per indicator. Do not silently pick
@@ -153,7 +256,7 @@ plot_status_prop_pies_plotly_v2 <- function(
   indicators <- c("Fref", "Bref")
   headers <- c(
     Fref = "Fishing pressure (F/Fref)",
-    Bref = "Stock size (B/Bref)"
+    Bref = "Stock status (B/Bref)"
   )
 
   # ---------------------------------------------------------
@@ -192,24 +295,21 @@ plot_status_prop_pies_plotly_v2 <- function(
     sort(setdiff(present_guilds, desired_guilds))
   )
 
-  format_stocks <- function(ids) {
-    shown <- utils::head(ids, max_hover_stocks)
-    out <- paste(shown, collapse = "<br>")
-    n_more <- length(ids) - length(shown)
-    if (n_more > 0L) {
-      out <- paste0(out, "<br>... and ", n_more, " more")
-    }
-    out
-  }
-
-  counts_plot$hover_text <- vapply(seq_len(nrow(counts_plot)), function(i) {
-    paste0(
-      "<b>", guild_display_name(counts_plot$GuildPlot[[i]]), " — ",
-      headers[[counts_plot$Indicator[[i]]]], "</b><br>",
-      "Status: ", counts_plot$Colour[[i]], "<br>",
-      "Stocks: ", counts_plot$COUNT[[i]], " / ", counts_plot$total_stocks[[i]],
-      " (", sprintf("%.1f", counts_plot$pct[[i]]), "%)<br><br>",
-      "<b>Stocks</b><br>", format_stocks(counts_plot$stock_ids[[i]])
+  counts_plot$hover_payload <- vapply(seq_len(nrow(counts_plot)), function(index) {
+    stock_ids <- counts_plot$stock_ids[[index]]
+    shown <- utils::head(stock_ids, max_hover_stocks)
+    jsonlite::toJSON(
+      list(
+        guild = guild_display_name(counts_plot$GuildPlot[[index]]),
+        indicator = headers[[counts_plot$Indicator[[index]]]],
+        status = counts_plot$Colour[[index]],
+        n_stocks = counts_plot$COUNT[[index]],
+        total_stocks = counts_plot$total_stocks[[index]],
+        pct = counts_plot$pct[[index]],
+        stocks = as.list(shown),
+        additional_stocks = length(stock_ids) - length(shown)
+      ),
+      auto_unbox = TRUE, na = "null", null = "null", digits = 12
     )
   }, character(1))
 
@@ -297,8 +397,8 @@ plot_status_prop_pies_plotly_v2 <- function(
         labels = as.character(sub$Colour),
         values = as.numeric(sub$COUNT),
         text = as.character(sub$COUNT),
-        customdata = as.character(sub$hover_text),
-        hovertemplate = "%{customdata}<extra></extra>",
+        customdata = as.character(sub$hover_payload),
+        hoverinfo = "none",
         textinfo = "text",
         textposition = "inside",
         insidetextorientation = "horizontal",
@@ -324,9 +424,10 @@ plot_status_prop_pies_plotly_v2 <- function(
       }
 
       ann[[length(ann) + 1L]] <- list(
-        x = (x0 + x1) / 2,
-        y = y0 - 0.025,
+        x = mean(c(x0, x1)),
+        y = y0 - 0.012,
         xref = "paper", yref = "paper",
+        xanchor = "center",
         text = paste0("total = ", pie_total, " stocks"),
         showarrow = FALSE,
         font = list(size = 10),
@@ -394,21 +495,22 @@ plot_status_prop_pies_plotly_v2 <- function(
   p <- plotly::layout(
     p,
     height = plot_height,
+    showlegend = FALSE,
     paper_bgcolor = "white",
     plot_bgcolor = "white",
-    legend = list(
-      title = list(text = "Status"),
-      x = 1.01, y = 1,
-      xanchor = "left", yanchor = "top",
-      bgcolor = "rgba(255,255,255,0.85)"
-    ),
+    # legend = list(
+    #   title = list(text = "Status"),
+    #   x = 1.01, y = 1,
+    #   xanchor = "left", yanchor = "top",
+    #   bgcolor = "rgba(255,255,255,0.85)"
+    # ),
     margin = list(l = 95, r = 115, t = 65, b = 85),
     xaxis = list(visible = FALSE, range = c(0, 1), fixedrange = TRUE),
     yaxis = list(visible = FALSE, range = c(0, 1), fixedrange = TRUE),
     annotations = ann
   )
 
-  plotly::config(
+  p <- plotly::config(
     p,
     toImageButtonOptions = list(
       filename = paste0("Status_pies_", format(Sys.Date(), "%d-%b-%y")),
@@ -416,6 +518,45 @@ plot_status_prop_pies_plotly_v2 <- function(
       scale = 3
     )
   )
+
+  renderer <- r"---(
+function(el, x) {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'status-pies-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.style.display = 'none';
+  tooltip.innerHTML = '<style>' +
+    '.status-pies-tooltip{position:fixed;z-index:2147483000;width:400px;max-width:calc(100vw - 20px);max-height:calc(100vh - 20px);overflow-y:auto;box-sizing:border-box;padding:15px 16px;background:#fff;color:#243746;border:1px solid #d8e2ea;border-radius:8px;box-shadow:0 10px 32px rgba(15,33,45,.22);font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;pointer-events:auto;}' +
+    '.status-pies-tooltip *{box-sizing:border-box;}' +
+    '.status-pies-tooltip .sp-title{font-size:16px;font-weight:700;overflow-wrap:anywhere;}' +
+    '.status-pies-tooltip .sp-muted{font-size:11px;color:#697b87;}' +
+    '.status-pies-tooltip .sp-summary{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 0;border-bottom:1px solid #e4eaf0;}' +
+    '.status-pies-tooltip .sp-percent{font-size:21px;font-weight:750;white-space:nowrap;}' +
+    '.status-pies-tooltip .sp-section{font-size:12px;font-weight:700;margin-top:10px;}' +
+    '.status-pies-tooltip .sp-stock{font-size:11px;font-weight:650;overflow-wrap:anywhere;padding:7px 0;border-bottom:1px solid #eef2f5;}' +
+    '</style>';
+  const safe = value => String(value == null ? '' : value).replace(/[&<>"']/g,
+    character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
+  const pct = value => typeof value === 'number' && Number.isFinite(value) ?
+    value.toFixed(1) + '%' : 'Not available';
+  const build = function(data) {
+    let html = '<div class="sp-title">' + safe(data.guild) + '</div>' +
+      '<div class="sp-muted">' + safe(data.indicator) + ' | ' + safe(data.status) + '</div>' +
+      '<div class="sp-summary"><div><b>' + safe(data.n_stocks) + ' / ' + safe(data.total_stocks) +
+      ' stocks</b><div class="sp-muted">Stocks in slice / guild total</div></div>' +
+      '<div class="sp-percent">' + pct(data.pct) + '</div></div>' +
+      '<div class="sp-section">Stocks in slice</div>';
+    (Array.isArray(data.stocks) ? data.stocks : []).forEach(function(stock) {
+      html += '<div class="sp-stock">' + safe(stock) + '</div>';
+    });
+    if (data.additional_stocks > 0) html += '<div class="sp-muted" style="margin-top:7px">... and ' +
+      safe(data.additional_stocks) + ' more stocks</div>';
+    return html;
+  };
+  return {tooltip, build};
+}
+)---"
+  add_html_hover(p, renderer)
 }
 
 # Catch/landing-weighted GES pies (six guild columns, two F/B rows).
@@ -458,6 +599,12 @@ plot_GES_pies_plotly_v2 <- function(
   if (!"Landings_in_ecoregion" %in% names(y)) {
     y$Landings_in_ecoregion <- NA_real_
   }
+  if (!"Catches_out_ecoregion" %in% names(y)) {
+    y$Catches_out_ecoregion <- NA_real_
+  }
+  if (!"Landings_out_ecoregion" %in% names(y)) {
+    y$Landings_out_ecoregion <- NA_real_
+  }
 
   to_number <- function(z) suppressWarnings(as.numeric(as.character(z)))
   clean_nonnegative <- function(z) {
@@ -496,7 +643,7 @@ plot_GES_pies_plotly_v2 <- function(
     ) |>
     dplyr::distinct()
 
-  if (nrow(stock_df) == 0L) stop("No stocks in x.")
+  if (nrow(stock_df) == 0L) stop_plot_no_data("No stocks in x.")
 
   # Exact duplicate rows are harmless, but differing records for the
   # same stock should not be joined/counted twice.
@@ -529,22 +676,37 @@ plot_GES_pies_plotly_v2 <- function(
   # 2. Attach ecoregion catches, falling back to landings.
   #    Missing catch weights are not converted into status GREY.
   # ---------------------------------------------------------
+  share_unavailable <- if ("share" %in% names(y)) {
+    share_values <- to_number(y$share)
+    !is.finite(share_values) | share_values < 0 | share_values > 1
+  } else {
+    rep(FALSE, nrow(y))
+  }
   catch_df <- y |>
     dplyr::transmute(
       StockKeyLabel = as.character(StockKeyLabel),
+      ShareUnavailable = share_unavailable,
       catch_value = clean_nonnegative(Catches_in_ecoregion),
-      landing_value = clean_nonnegative(Landings_in_ecoregion)
+      landing_value = clean_nonnegative(Landings_in_ecoregion),
+      outside_catch = clean_nonnegative(Catches_out_ecoregion),
+      outside_landings = clean_nonnegative(Landings_out_ecoregion)
     ) |>
     dplyr::filter(!is.na(StockKeyLabel), nzchar(StockKeyLabel)) |>
     dplyr::mutate(
       CATCH = dplyr::coalesce(catch_value, landing_value),
+      OUT_CATCH = dplyr::case_when(
+        !is.na(catch_value) ~ outside_catch,
+        !is.na(landing_value) ~ outside_landings,
+        TRUE ~ NA_real_
+      ),
       CatchSource = dplyr::case_when(
         !is.na(catch_value) ~ "Catches",
         !is.na(landing_value) ~ "Landings",
         TRUE ~ "Missing"
       )
     ) |>
-    dplyr::select(StockKeyLabel, CATCH, CatchSource) |>
+    dplyr::select(StockKeyLabel, CATCH, OUT_CATCH, CatchSource,
+            ShareUnavailable) |>
     dplyr::distinct()
 
   repeated_catch <- catch_df |>
@@ -558,7 +720,12 @@ plot_GES_pies_plotly_v2 <- function(
   }
 
   stock_df <- stock_df |>
-    dplyr::left_join(catch_df, by = "StockKeyLabel")
+    dplyr::left_join(catch_df, by = "StockKeyLabel") |>
+    dplyr::mutate(
+      ExclusionReason = ecoregion_exclusion_reason(
+        is.finite(CATCH) & CATCH > 0, ShareUnavailable %in% TRUE
+      )
+    )
 
   # ---------------------------------------------------------
   # 3. Long data: each stock contributes to BOTH indicators.
@@ -566,12 +733,14 @@ plot_GES_pies_plotly_v2 <- function(
   long_df <- dplyr::bind_rows(
     stock_df |>
       dplyr::transmute(
-        StockKeyLabel, FisheriesGuild, CATCH, CatchSource,
+        StockKeyLabel, FisheriesGuild, CATCH, OUT_CATCH, CatchSource,
+        ExclusionReason,
         Indicator = "Fref", Colour = F_Status
       ),
     stock_df |>
       dplyr::transmute(
-        StockKeyLabel, FisheriesGuild, CATCH, CatchSource,
+        StockKeyLabel, FisheriesGuild, CATCH, OUT_CATCH, CatchSource,
+        ExclusionReason,
         Indicator = "Bref", Colour = B_Status
       )
   )
@@ -589,6 +758,12 @@ plot_GES_pies_plotly_v2 <- function(
     dplyr::summarise(
       n_stocks = dplyr::n(),
       excluded_stocks = sum(!is.finite(CATCH) | CATCH <= 0),
+      excluded_share_unavailable = sum(
+        ExclusionReason == "share unavailable", na.rm = TRUE
+      ),
+      excluded_no_positive_quantity = sum(
+        ExclusionReason == "quantity unavailable or non-positive", na.rm = TRUE
+      ),
       .groups = "drop"
     )
 
@@ -596,8 +771,10 @@ plot_GES_pies_plotly_v2 <- function(
     dplyr::filter(is.finite(CATCH), CATCH > 0)
 
   if (nrow(weighted) == 0L) {
-    stop("No stocks have positive Catches_in_ecoregion or ",
-         "Landings_in_ecoregion values.")
+    stop_plot_no_data(paste0(
+      "No stocks have positive Catches_in_ecoregion or ",
+      "Landings_in_ecoregion values."
+    ))
   }
 
   # Stock-level hover text within each status slice.
@@ -632,12 +809,31 @@ plot_GES_pies_plotly_v2 <- function(
     paste(lines, collapse = "<br>")
   }
 
+  build_stock_breakdown <- function(stock_ids, catches, outside, sources) {
+    shown <- utils::head(order(catches, decreasing = TRUE), max_hover_stocks)
+    list(
+      stocks = lapply(shown, function(index) {
+        list(
+          stock = stock_ids[[index]],
+          inside_t = catches[[index]],
+          outside_t = outside[[index]],
+          source = sources[[index]],
+          slice_pct = 100 * catches[[index]] / sum(catches)
+        )
+      }),
+      n_more = length(stock_ids) - length(shown)
+    )
+  }
+
   slices <- weighted |>
     dplyr::group_by(FisheriesGuild, Indicator, Colour) |>
     dplyr::summarise(
       Catch = sum(CATCH),
       COUNT = dplyr::n(),
       breakdown_html = build_breakdown(StockKeyLabel, CATCH, CatchSource),
+      stock_breakdown = list(build_stock_breakdown(
+        StockKeyLabel, CATCH, OUT_CATCH, CatchSource
+      )),
       stock_ids = list(StockKeyLabel),
       .groups = "drop"
     ) |>
@@ -651,7 +847,7 @@ plot_GES_pies_plotly_v2 <- function(
 
   headers <- c(
     Fref = "Fishing pressure (F/Fref)",
-    Bref = "Stock size (B/Bref)"
+    Bref = "Stock status (B/Bref)"
   )
 
   slices$hover_text <- vapply(seq_len(nrow(slices)), function(i) {
@@ -662,10 +858,31 @@ plot_GES_pies_plotly_v2 <- function(
       "Catch / landings: ", format_tonnes(slices$Catch[[i]]), " t",
       " (", sprintf("%.1f%%", slices$pct[[i]]), ")<br>",
       "Stocks in slice: ", slices$COUNT[[i]], "<br>",
-      "Stocks excluded from this guild (no positive catch): ",
-      slices$excluded_stocks[[i]], "<br><br>",
+      "Stocks excluded from this guild: ", slices$excluded_stocks[[i]], "<br>",
+      "No ecoregion landings share available: ", slices$excluded_share_unavailable[[i]], "<br>",
+      "No positive catch/landings (zero, missing or invalid quantity): ",
+      slices$excluded_no_positive_quantity[[i]], "<br><br>",
       "<b>Catch by stock</b><br>", slices$breakdown_html[[i]]
     )
+  }, character(1))
+
+  slices$hover_payload <- vapply(seq_len(nrow(slices)), function(index) {
+    jsonlite::toJSON(
+      list(
+        guild = slices$FisheriesGuild[[index]],
+        indicator = headers[[slices$Indicator[[index]]]],
+        status = slices$Colour[[index]],
+        inside_t = slices$Catch[[index]],
+        pct = slices$pct[[index]],
+        n_stocks = slices$COUNT[[index]],
+        excluded_stocks = slices$excluded_stocks[[index]],
+        excluded_share_unavailable = slices$excluded_share_unavailable[[index]],
+        excluded_no_positive_quantity = slices$excluded_no_positive_quantity[[index]],
+        stocks = slices$stock_breakdown[[index]]$stocks,
+        additional_stocks = slices$stock_breakdown[[index]]$n_more
+      ),
+      auto_unbox = TRUE, na = "null", null = "null", digits = 12
+    ) |> as.character()
   }, character(1))
 
   if (isTRUE(return_data)) return(slices)
@@ -771,9 +988,9 @@ plot_GES_pies_plotly_v2 <- function(
         type = "pie",
         labels = as.character(sub$Colour),
         values = as.numeric(sub$Catch),
-        customdata = as.character(sub$hover_text),
-        hovertemplate = "%{customdata}<extra></extra>",
-        textinfo = "label+percent",
+        customdata = as.character(sub$hover_payload),
+        hoverinfo = "none",
+        textinfo = "percent",
         textposition = "auto",
         insidetextorientation = "horizontal",
         sort = FALSE,
@@ -816,10 +1033,12 @@ plot_GES_pies_plotly_v2 <- function(
   }
 
   annotations[[length(annotations) + 1L]] <- list(
-    x = 1, y = -0.04,
+    x = 1, y = 0, xshift = 108, yshift = -15,
     xref = "paper", yref = "paper",
     xanchor = "right", yanchor = "top", showarrow = FALSE,
+    align = "right",
     text = paste0(
+      "Ecoregion catch/landings/discard shares estimated from RDBES<br>",
       "ICES Stock Assessment Database, ",
       format(Sys.Date(), "%d-%b-%y"), ". ICES, Copenhagen"
     ),
@@ -832,39 +1051,100 @@ plot_GES_pies_plotly_v2 <- function(
   p <- plotly::layout(
     p,
     height = plot_height,
+    showlegend = FALSE,
     paper_bgcolor = "white", plot_bgcolor = "white",
-    legend = list(
-      title = list(text = "Status"),
-      x = 1.01, y = 1, xanchor = "left", yanchor = "top",
-      bgcolor = "rgba(255,255,255,0.90)"
-    ),
+    # legend = list(
+    #   title = list(text = "Status"),
+    #   x = 1.01, y = 1, xanchor = "left", yanchor = "top",
+    #   bgcolor = "rgba(255,255,255,0.90)"
+    # ),
     margin = list(l = 100, r = 120, t = 65, b = 75),
     xaxis = list(visible = FALSE, range = c(0, 1), fixedrange = TRUE),
     yaxis = list(visible = FALSE, range = c(0, 1), fixedrange = TRUE),
     annotations = annotations
   )
 
-  plotly::config(
+  p <- plotly::config(
     p,
     toImageButtonOptions = list(
       filename = paste0("GES_pies_precautionary_", format(Sys.Date(), "%d-%b-%y")),
       format = "png", scale = 3
     )
   )
+
+  renderer <- r"---(
+function(el, x) {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'ges-pies-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.style.display = 'none';
+  tooltip.innerHTML = '<style>' +
+    '.ges-pies-tooltip{position:fixed;z-index:2147483000;width:400px;max-width:calc(100vw - 20px);max-height:calc(100vh - 20px);overflow-y:auto;box-sizing:border-box;padding:15px 16px;background:#fff;color:#243746;border:1px solid #d8e2ea;border-radius:8px;box-shadow:0 10px 32px rgba(15,33,45,.22);font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;pointer-events:auto;}' +
+    '.ges-pies-tooltip *{box-sizing:border-box;}' +
+    '.ges-pies-tooltip .gp-title{font-size:16px;font-weight:700;overflow-wrap:anywhere;}' +
+    '.ges-pies-tooltip .gp-muted{font-size:11px;color:#697b87;}' +
+    '.ges-pies-tooltip .gp-summary{padding:10px 0;border-bottom:1px solid #e4eaf0;}' +
+    '.ges-pies-tooltip .gp-stock{padding:9px 0;border-bottom:1px solid #eef2f5;}' +
+    '.ges-pies-tooltip .gp-row{display:flex;justify-content:space-between;gap:8px;align-items:baseline;}' +
+    '.ges-pies-tooltip .gp-code{font-size:11px;font-weight:650;overflow-wrap:anywhere;min-width:0;}' +
+    '.ges-pies-tooltip .gp-track{display:flex;height:10px;background:#e9eef2;border-radius:4px;overflow:hidden;margin:5px 0;}' +
+    '.ges-pies-tooltip .gp-in{background:#6895af;flex:none;}' +
+    '.ges-pies-tooltip .gp-out{background:#d77a52;flex:none;}' +
+    '.ges-pies-tooltip .gp-key{display:inline-block;width:9px;height:9px;margin-right:4px;}' +
+    '</style>';
+  const safe = value => String(value == null ? '' : value).replace(/[&<>"']/g,
+    character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
+  const isNumber = value => typeof value === 'number' && Number.isFinite(value);
+  const fmt = value => isNumber(value) ? value.toLocaleString('en-GB', {
+    maximumFractionDigits:0
+  }) : 'Not available';
+  const pct = value => isNumber(value) ? value.toFixed(1) + '%' : 'Not available';
+  const build = function(data) {
+    let html = '<div class="gp-title">' + safe(data.guild) + '</div>' +
+      '<div class="gp-muted">' + safe(data.indicator) + ' | ' + safe(data.status) + '</div>' +
+      '<div class="gp-summary"><b>' + fmt(data.inside_t) + ' t in ecoregion</b> (' + pct(data.pct) + ' of guild)' +
+      '<div class="gp-muted">' + safe(data.n_stocks) + ' stocks in slice; ' +
+      safe(data.excluded_stocks) + ' excluded from guild' +
+      '<br>No ecoregion landings share available: ' + safe(data.excluded_share_unavailable) +
+      '<br>No positive catch/landings (zero, missing or invalid quantity): ' +
+      safe(data.excluded_no_positive_quantity) + '</div></div>' +
+      '<div class="gp-muted" style="margin-top:9px"><i class="gp-key gp-in"></i>Inside ecoregion ' +
+      '<i class="gp-key gp-out"></i>Outside ecoregion</div>';
+    (Array.isArray(data.stocks) ? data.stocks : []).forEach(function(stock) {
+      const knownOutside = isNumber(stock.outside_t) && stock.outside_t >= 0;
+      const total = knownOutside ? stock.inside_t + stock.outside_t : null;
+      const insidePct = isNumber(total) && total > 0 ? 100 * stock.inside_t / total : null;
+      const outsidePct = insidePct === null ? null : 100 - insidePct;
+      const bar = insidePct === null ? '<div class="gp-track"></div>' :
+        '<div class="gp-track" role="img" aria-label="' + pct(insidePct) + ' inside; ' + pct(outsidePct) + ' outside">' +
+        '<div class="gp-in" style="width:' + insidePct + '%"></div>' +
+        '<div class="gp-out" style="width:' + outsidePct + '%"></div></div>';
+      html += '<div class="gp-stock"><div class="gp-row"><span class="gp-code">' + safe(stock.stock) +
+        '</span><span class="gp-muted" style="white-space:nowrap">' + pct(stock.slice_pct) + ' of slice</span></div>' +
+        bar + '<div class="gp-muted">' + safe(stock.source) + ' inside: ' + fmt(stock.inside_t) + ' t (' + pct(insidePct) + ')' +
+        '<br>Outside: ' + (knownOutside ? fmt(stock.outside_t) + ' t (' + pct(outsidePct) + ')' : 'Not available') + '</div></div>';
+    });
+    if (data.additional_stocks > 0) html += '<div class="gp-muted">... and ' + safe(data.additional_stocks) + ' more stocks</div>';
+    return html;
+  };
+  return {tooltip, build};
+}
+)---"
+  add_html_hover(p, renderer)
 }
 
 
 
-# Kobe v3 with capped Unknown panel and responsive autosizing.
+# Kobe v3 with responsive autosizing.
 # Extracted from the latest utilities_GES_pies.R.
 
 plot_kobe_app_plotly_v3 <- function(
     x,
     guild,
     return_data = FALSE,
-    size_by_catches = FALSE,
+    size_by_catches = TRUE,
     min_point_size = 8,
-    max_point_size = 25,
+    max_point_size = 27,
     n_size_legend = 4,
     unknown_row_px = 26,
     max_unknown_stocks = 12
@@ -971,8 +1251,8 @@ plot_kobe_app_plotly_v3 <- function(
     TRUE ~ "No catch/landing data"
   )
 
-  # 5. ONE size scale for both panels (including unknown-status stocks).
-  size_values <- df$CatchSizeValue[is.finite(df$CatchSizeValue)]
+  # 5. Size scale and legend use only stocks with valid Kobe coordinates.
+  size_values <- df$CatchSizeValue[known & is.finite(df$CatchSizeValue)]
   c_min <- if (length(size_values)) min(size_values) else NA_real_
   c_max <- if (length(size_values)) max(size_values) else NA_real_
 
@@ -1000,11 +1280,6 @@ plot_kobe_app_plotly_v3 <- function(
 
   # 6. Derive linear main-axis limits from stocks with both ratios.
   plot_df <- df[known, , drop = FALSE]
-  unknown_df <- df[!known, , drop = FALSE]
-  n_unknown_total <- nrow(unknown_df)
-  has_unknown <- n_unknown_total > 0L
-  # All unknown stocks remain in df; only the right-panel display is capped.
-  n_unknown_shown <- as.integer(min(n_unknown_total, max_unknown_stocks))
 
   if (nrow(plot_df) > 0L) {
     xmin <- min(c(plot_df$F_FMSY, 1))
@@ -1037,18 +1312,43 @@ plot_kobe_app_plotly_v3 <- function(
   format_ratio <- function(v) {
     ifelse(is.finite(v) & v >= 0, sprintf("%.2f", v), "NA")
   }
+  reference_names <- function(column) {
+    if (!column %in% names(df)) return(rep("Reference name unavailable", nrow(df)))
+    values <- as.character(df[[column]])
+    values[is.na(values) | !nzchar(trimws(values))] <- "Reference name unavailable"
+    values
+  }
+  fref_names <- reference_names("Fref_name")
+  bref_names <- reference_names("Bref_name")
 
   df$hover_text <- paste0(
     "<b>", html_safe(df$StockKeyLabel), "</b><br>",
-    "F/Fref: ", format_ratio(df$F_FMSY), "<br>",
-    "B/Bref: ", format_ratio(df$SSB_MSYBtrigger), "<br>",
+    "F/Fref: ", format_ratio(df$F_FMSY), " (", html_safe(fref_names), ")<br>",
+    "B/Bref: ", format_ratio(df$SSB_MSYBtrigger), " (", html_safe(bref_names), ")<br>",
     "Kobe status: ", df$KobeStatus, "<br>",
     ifelse(df$KobeStatus == "Unknown", df$UnknownReason, df$KobeDescription),
     "<br>", df$CatchSizeSource, ": ", format_quantity(df$CatchSizeValue),
     " t"
   )
+  df$hover_payload <- vapply(seq_len(nrow(df)), function(index) {
+    jsonlite::toJSON(
+      list(
+        stock = as.character(df$StockKeyLabel[[index]]),
+        guild = as.character(df$FisheriesGuild[[index]]),
+        f_ratio = if (valid_f[[index]]) df$F_FMSY[[index]] else NA_real_,
+        b_ratio = if (valid_b[[index]]) df$SSB_MSYBtrigger[[index]] else NA_real_,
+        fref_name = fref_names[[index]],
+        bref_name = bref_names[[index]],
+        status = df$KobeStatus[[index]],
+        description = if (known[[index]]) df$KobeDescription[[index]] else df$UnknownReason[[index]],
+        reference_type = df$ProxyFlag[[index]],
+        catch_t = df$CatchSizeValue[[index]],
+        catch_source = df$CatchSizeSource[[index]]
+      ),
+      auto_unbox = TRUE, na = "null", null = "null", digits = 12
+    ) |> as.character()
+  }, character(1))
   plot_df <- df[known, , drop = FALSE]
-  unknown_df <- df[!known, , drop = FALSE]
 
   p <- plotly::plot_ly()
   stock_annotations <- list()
@@ -1074,16 +1374,14 @@ plot_kobe_app_plotly_v3 <- function(
           symbol = symbol, size = sub$point_size,
           color = col, line = marker_line
         ),
-        customdata = ~hover_text,
-        hovertemplate = "%{customdata}<extra></extra>",
+        customdata = ~hover_payload,
+        hoverinfo = "none",
         showlegend = FALSE, opacity = opacity, inherit = FALSE
       )
 
       for (k in seq_len(nrow(sub))) {
-        # In the split view, place labels for right-edge stocks to their
-        # left, reducing spillover into the unknown-status panel.
-        at_right_edge <- has_unknown &&
-          sub$F_FMSY[[k]] > (x_range[[2]] - 0.20 * diff(x_range))
+        at_right_edge <- sub$F_FMSY[[k]] >
+          (x_range[[2]] - 0.20 * diff(x_range))
         label_shift <- sub$point_size[[k]] / 2 + 8
 
         stock_annotations[[length(stock_annotations) + 1L]] <<- list(
@@ -1110,50 +1408,6 @@ plot_kobe_app_plotly_v3 <- function(
     "circle-open", 2, 1
   )
 
-  # 9. Unknown panel: show up to max_unknown_stocks, ordered by catches.
-  # Keep all unknown stocks for return_data and shared size scaling.
-  # Separate x3/y3 axes are independent of the F/B axes.
-  if (has_unknown) {
-    unknown_df <- dplyr::arrange(
-      unknown_df, dplyr::desc(CatchSizeValue), StockKeyLabel
-    )
-    unknown_df <- unknown_df[seq_len(n_unknown_shown), , drop = FALSE]
-    unknown_df$PanelX <- rep(0.13, nrow(unknown_df))
-    unknown_df$PanelY <- rev(seq_len(nrow(unknown_df)))
-    unknown_df$PanelLabel <- substr(as.character(unknown_df$StockKeyLabel), 1, 24)
-
-    for (proxy_type in c("Reference point", "Proxy reference point")) {
-      sub <- unknown_df[
-        unknown_df$ProxyFlag == proxy_type, , drop = FALSE
-      ]
-      if (nrow(sub) == 0L) next
-      is_proxy <- identical(proxy_type, "Proxy reference point")
-
-      p <- plotly::add_trace(
-        p,
-        data = sub,
-        type = "scatter", mode = "markers+text",
-        x = ~PanelX, y = ~PanelY,
-        xaxis = "x3", yaxis = "y3",
-        text = ~PanelLabel, textposition = "middle right",
-        textfont = list(size = 10, color = "#333333"),
-        marker = list(
-          symbol = if (is_proxy) "circle-open" else "circle",
-          size = sub$point_size,
-          color = if (is_proxy) "#858585" else status_pal[["Unknown"]],
-          line = list(
-            color = if (is_proxy) "#858585" else "#333333",
-            width = if (is_proxy) 2 else 0.1
-          )
-        ),
-        customdata = ~hover_text,
-        hovertemplate = "%{customdata}<extra></extra>",
-        showlegend = FALSE, inherit = FALSE,
-        cliponaxis = FALSE
-      )
-    }
-  }
-
   # 10. Legend for standard / proxy markers (unchanged).
   legend_defs <- list(
     "Reference point" = list(symbol = "circle", width = 0.1),
@@ -1173,7 +1427,7 @@ plot_kobe_app_plotly_v3 <- function(
     )
   }
 
-  # 11. ONE size legend covering stocks in BOTH panels.
+  # 11. ONE size legend.
   if (isTRUE(size_by_catches) && length(size_values) > 0L) {
     # Number of representative sizes displayed in the legend
     if (!is.numeric(n_size_legend) ||
@@ -1217,10 +1471,7 @@ plot_kobe_app_plotly_v3 <- function(
     }
   }
 
-  # 12. Layout: reserve a side domain only if unknown stocks exist.
-  # No unknown stocks -> the regular Kobe plot occupies the full width.
-  main_domain <- if (has_unknown) c(0, 0.72) else c(0, 1)
-  legend_outside <- isTRUE(size_by_catches) || has_unknown
+  legend_outside <- isTRUE(size_by_catches)
   layout_shapes <- list(
     list(
       type = "line", x0 = 1, x1 = 1,
@@ -1235,43 +1486,13 @@ plot_kobe_app_plotly_v3 <- function(
   )
   layout_annotations <- stock_annotations
 
-  if (has_unknown) {
-    layout_shapes <- c(
-      list(
-        list(
-          type = "rect", xref = "paper", yref = "paper",
-          x0 = 0.78, x1 = 1, y0 = 0, y1 = 1,
-          fillcolor = "rgba(245,245,245,0.55)",
-          line = list(width = 0), layer = "below"
-        ),
-        list(
-          type = "line", xref = "paper", yref = "paper",
-          x0 = 0.765, x1 = 0.765, y0 = 0, y1 = 1,
-          line = list(color = "#CCCCCC", width = 1)
-        )
-      ),
-      layout_shapes
-    )
-    layout_annotations[[length(layout_annotations) + 1L]] <- list(
-      x = 0.89, y = 1.035, xref = "paper", yref = "paper",
-      text = paste0("<b>Unknown status (", n_unknown_total, ")</b>"),
-      xanchor = "center", yanchor = "bottom", showarrow = FALSE,
-      font = list(size = 12, color = "#333333")
-    )
-    if (n_unknown_shown < n_unknown_total) {
-      layout_annotations[[length(layout_annotations) + 1L]] <- list(
-        x = 0.89, y = 1.005, xref = "paper", yref = "paper",
-        text = paste0("Showing ", n_unknown_shown, " of ", n_unknown_total),
-        xanchor = "center", yanchor = "bottom", showarrow = FALSE,
-        font = list(size = 10, color = "#666666")
-      )
-    }
-  }
-
   layout_annotations[[length(layout_annotations) + 1L]] <- list(
-    x = 1, y = -0.14, xref = "paper", yref = "paper",
+    x = 1, y = 0, xref = "paper", yref = "paper",
+    xshift = if (legend_outside) 268 else 18, yshift = -62,
     xanchor = "right", yanchor = "top", showarrow = FALSE,
+    align = "right",
     text = paste0(
+      "Ecoregion catch/landings/discard shares estimated from RDBES<br>",
       "ICES Stock Assessment Database, ",
       format(Sys.Date(), "%d-%b-%y"), ". ICES, Copenhagen"
     ),
@@ -1284,7 +1505,7 @@ plot_kobe_app_plotly_v3 <- function(
     autosize = TRUE,
     paper_bgcolor = "white", plot_bgcolor = "white",
     xaxis = list(
-      title = "F/Fref", domain = main_domain,
+      title = "F/Fref", domain = c(0, 1),
       range = x_range, zeroline = FALSE
     ),
     yaxis = list(
@@ -1299,15 +1520,6 @@ plot_kobe_app_plotly_v3 <- function(
       overlaying = "y", visible = FALSE, range = c(0, 1),
       fixedrange = TRUE, autorange = FALSE
     ),
-    xaxis3 = if (has_unknown) list(
-      domain = c(0.79, 1), anchor = "y3", range = c(0, 1),
-      visible = FALSE, fixedrange = TRUE
-    ) else NULL,
-    yaxis3 = if (has_unknown) list(
-      domain = c(0, 1), anchor = "x3",
-      range = c(0.5, n_unknown_shown + 0.5),
-      visible = FALSE, fixedrange = TRUE
-    ) else NULL,
     shapes = layout_shapes,
     legend = list(
       title = list(text = "ICES reference point"),
@@ -1322,12 +1534,12 @@ plot_kobe_app_plotly_v3 <- function(
     hovermode = "closest",
     margin = list(
       l = 90, r = if (legend_outside) 280 else 30,
-      t = if (has_unknown) 55 else 30, b = 70
+      t = 30, b = 110
     ),
     annotations = layout_annotations
   )
 
-  plotly::config(
+  p <- plotly::config(
     p,
     responsive = TRUE,
     toImageButtonOptions = list(
@@ -1335,5 +1547,1895 @@ plot_kobe_app_plotly_v3 <- function(
       format = "png", scale = 3
     )
   )
+
+  renderer <- r"---(
+function(el, x) {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'kobe-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.style.display = 'none';
+  tooltip.innerHTML = '<style>' +
+    '.kobe-tooltip{position:fixed;z-index:2147483000;width:400px;max-width:calc(100vw - 20px);max-height:calc(100vh - 20px);overflow-y:auto;box-sizing:border-box;padding:15px 16px;background:#fff;color:#243746;border:1px solid #d8e2ea;border-radius:8px;box-shadow:0 10px 32px rgba(15,33,45,.22);font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;pointer-events:auto;}' +
+    '.kobe-tooltip *{box-sizing:border-box;}' +
+    '.kobe-tooltip .kb-title{font-size:16px;font-weight:700;overflow-wrap:anywhere;}' +
+    '.kobe-tooltip .kb-muted{font-size:11px;color:#697b87;overflow-wrap:anywhere;}' +
+    '.kobe-tooltip .kb-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:12px 0;}' +
+    '.kobe-tooltip .kb-value{font-size:20px;font-weight:700;overflow-wrap:anywhere;}' +
+    '.kobe-tooltip .kb-ref{font-size:12px;font-weight:400;color:#697b87;overflow-wrap:anywhere;}' +
+    '.kobe-tooltip .kb-status{padding:10px 0;border-top:1px solid #e4eaf0;border-bottom:1px solid #e4eaf0;margin-bottom:10px;overflow-wrap:anywhere;}' +
+    '</style>';
+  const safe = value => String(value == null ? '' : value).replace(/[&<>"']/g,
+    character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
+  const isNumber = value => typeof value === 'number' && Number.isFinite(value);
+  const ratio = value => isNumber(value) && value >= 0 ? value.toFixed(2) : 'Not available';
+  const quantity = value => isNumber(value) ? value.toLocaleString('en-GB', {
+    maximumFractionDigits:0
+  }) + ' t' : 'Not available';
+  const build = function(data) {
+    return '<div class="kb-title">' + safe(data.stock) + '</div>' +
+      '<div class="kb-muted">' + safe(data.guild) + ' | ' + safe(data.reference_type) + '</div>' +
+      '<div class="kb-grid"><div><div class="kb-muted">F/Fref</div>' +
+      '<div class="kb-value">' + ratio(data.f_ratio) + ' <span class="kb-ref">(' + safe(data.fref_name) + ')</span></div></div>' +
+      '<div><div class="kb-muted">B/Bref</div><div class="kb-value">' + ratio(data.b_ratio) +
+      ' <span class="kb-ref">(' + safe(data.bref_name) + ')</span></div></div></div>' +
+      '<div class="kb-status"><b>Kobe status: ' + safe(data.status) + '</b>' +
+      '<div class="kb-muted">' + safe(data.description) + '</div></div>' +
+      '<div class="kb-muted">' + safe(data.catch_source) + '</div><b>' + quantity(data.catch_t) + '</b>';
+  };
+  return {tooltip, build};
+}
+)---"
+  add_html_hover(p, renderer)
 }
 
+
+
+
+
+
+##### Discards plot
+
+
+
+plot_discard_trends_app_plotly_v3 <- function(
+    x, year, return_data = FALSE, ecoregion = NULL,
+    complete_pairs = TRUE,
+    width_px = 800, max_hover_stocks = 20
+) {
+  # Expects ecoregion-adjusted quantities in x, e.g. values multiplied by
+  # a stock-specific ShareLandingsInEcoregion. Regional landings/discards
+  # are required. Original Landings/Catches and regional catches are
+  # optional; if present they quantify the extent of excluded data.
+  #
+  # complete_pairs = TRUE: only stocks with BOTH landings and discards
+  # contribute to the guild-year numerator/denominator.
+  # complete_pairs = FALSE: independently sum available landings/discards,
+  # matching the original function's na.rm = TRUE treatment. A stock is
+  # excluded when BOTH values are missing or their known sum is zero.
+  #
+  # The returned data (return_data = TRUE) has one row per plotted guild-year,
+  # including all coverage/exclusion metrics and the structured stock breakdown.
+  # The HTML tooltip is drawn in the browser by htmlwidgets::onRender().
+
+  required <- c("Year", "StockKeyLabel", "FisheriesGuild",
+                "Landings_ecoregion", "Discards_ecoregion")
+  missing <- setdiff(required, names(x))
+  if (length(missing)) {
+    stop("Missing columns in x: ", paste(missing, collapse = ", "))
+  }
+  if (!is.logical(complete_pairs) || length(complete_pairs) != 1L ||
+      is.na(complete_pairs)) {
+    stop("complete_pairs must be TRUE or FALSE.")
+  }
+  if (!is.logical(return_data) || length(return_data) != 1L ||
+      is.na(return_data)) {
+    stop("return_data must be TRUE or FALSE.")
+  }
+  if (!is.numeric(year) || length(year) != 1L || !is.finite(year) ||
+      year <= 2011 || year != floor(year)) {
+    stop("year must be one integer-valued year greater than 2011.")
+  }
+  if (!is.numeric(max_hover_stocks) || length(max_hover_stocks) != 1L ||
+      !is.finite(max_hover_stocks) || max_hover_stocks < 1) {
+    stop("max_hover_stocks must be a positive number.")
+  }
+  if (!is.numeric(width_px) || length(width_px) != 1L ||
+      !is.finite(width_px) || width_px <= 0) width_px <- 800
+
+  max_hover_stocks <- as.integer(max_hover_stocks)
+
+  to_number <- function(z) suppressWarnings(as.numeric(as.character(z)))
+  clean_nonnegative <- function(z) {
+    z <- to_number(z)
+    z[!is.finite(z) | z < 0] <- NA_real_
+    z
+  }
+  escape_html <- function(z) {
+    z <- gsub("&", "&amp;", z, fixed = TRUE)
+    z <- gsub("<", "&lt;", z, fixed = TRUE)
+    gsub(">", "&gt;", z, fixed = TRUE)
+  }
+  format_tonnes <- function(z) {
+    out <- format(round(z, 1), big.mark = ",",
+                  scientific = FALSE, trim = TRUE)
+    out[is.na(z)] <- "not available"
+    out
+  }
+  # Do not print '0' for an excluded group in which every value is missing.
+  # With no excluded stocks the known excluded total is genuinely zero,
+  # provided the corresponding column exists.
+  known_total <- function(z) {
+    if (length(z) == 0L) return(0)
+    if (all(is.na(z))) return(NA_real_)
+    sum(z, na.rm = TRUE)
+  }
+  display_thousand <- function(z) {
+    if (is.na(z)) "not available" else
+      paste0(format_tonnes(z / 1000), " thousand t")
+  }
+  display_percent <- function(z) {
+    ifelse(is.na(z), "not available", sprintf("%.1f%%", z))
+  }
+
+  # Stock-level quantities for the genuine HTML/CSS stacked bars.
+  # Each segment's width is a percentage of included guild (L + D),
+  # not a percentage of the individual stock. Missing values are kept
+  # missing in labels rather than silently represented as observed zeros.
+  build_stock_breakdown <- function(stock_ids, landings, discards) {
+    known_L <- dplyr::coalesce(landings, 0)
+    known_D <- dplyr::coalesce(discards, 0)
+    amount <- known_L + known_D
+    positive <- which(amount > 0)
+    if (!length(positive)) {
+      return(list(stocks = list(), n_more = 0L))
+    }
+    ord <- positive[order(amount[positive], decreasing = TRUE)]
+    shown <- utils::head(ord, max_hover_stocks)
+    total <- sum(amount[positive])
+
+    stocks <- lapply(shown, function(i) {
+      list(
+        stock = as.character(stock_ids[i]),
+        landings_t = as.numeric(landings[i]),
+        discards_t = as.numeric(discards[i]),
+        # All widths have the same guild-year denominator.
+        landings_share_pct = 100 * known_L[i] / total,
+        discards_share_pct = 100 * known_D[i] / total,
+        share_pct = 100 * amount[i] / total,
+        rate_pct = if (is.na(landings[i]) || is.na(discards[i])) {
+          NA_real_
+        } else {
+          100 * discards[i] / amount[i]
+        }
+      )
+    })
+    list(stocks = stocks, n_more = length(ord) - length(shown))
+  }
+
+  # Catch and original quantity columns are optional because earlier
+  # versions of this function did not require them. Report each separately
+  # to avoid conflating full-stock and regional quantities.
+  catch_col <- if ("Catches_ecoregion" %in% names(x)) {
+    "Catches_ecoregion"
+  } else if ("Catches_ecoregion_est" %in% names(x)) {
+    "Catches_ecoregion_est"
+  } else {
+    NULL
+  }
+  catch_values <- if (is.null(catch_col)) {
+    rep(NA_real_, nrow(x))
+  } else {
+    clean_nonnegative(x[[catch_col]])
+  }
+  original_landings <- if ("Landings" %in% names(x)) {
+    clean_nonnegative(x[["Landings"]])
+  } else {
+    rep(NA_real_, nrow(x))
+  }
+  original_catches <- if ("Catches" %in% names(x)) {
+    clean_nonnegative(x[["Catches"]])
+  } else {
+    rep(NA_real_, nrow(x))
+  }
+
+  share_unavailable <- if ("share" %in% names(x)) {
+    share_values <- to_number(x$share)
+    !is.finite(share_values) | share_values < 0 | share_values > 1
+  } else {
+    rep(FALSE, nrow(x))
+  }
+
+  # One observation per stock-year; no rowid_to_column/spread/gather joins.
+  df_all <- x |>
+    dplyr::transmute(
+      Year = to_number(Year),
+      StockKeyLabel = as.character(StockKeyLabel),
+      FisheriesGuild = as.character(FisheriesGuild),
+      ShareUnavailable = share_unavailable,
+      Landings_ecoregion = clean_nonnegative(Landings_ecoregion),
+      Discards_ecoregion = clean_nonnegative(Discards_ecoregion),
+      Catches_ecoregion = catch_values,
+      Landings_original = original_landings,
+      Catches_original = original_catches
+    ) |>
+    dplyr::filter(
+      is.finite(Year), Year == floor(Year),
+      Year >= 2011, Year < year,
+      !is.na(StockKeyLabel), nzchar(StockKeyLabel),
+      !is.na(FisheriesGuild), nzchar(FisheriesGuild)
+    ) |>
+    dplyr::distinct()
+
+  repeated <- df_all |>
+    dplyr::count(Year, StockKeyLabel, name = "n") |>
+    dplyr::filter(n > 1L)
+  if (nrow(repeated)) {
+    stop(
+      "Multiple distinct records for the same stock and year: ",
+      paste(utils::head(repeated$StockKeyLabel, 8L), collapse = ", "),
+      ". Resolve these before plotting to avoid double counting."
+    )
+  }
+
+  df_all <- df_all |>
+    dplyr::mutate(
+      usable = if (complete_pairs) {
+        !is.na(Landings_ecoregion) & !is.na(Discards_ecoregion)
+      } else {
+        !is.na(Landings_ecoregion) | !is.na(Discards_ecoregion)
+      },
+      usable = usable & (
+        dplyr::coalesce(Landings_ecoregion, 0) +
+          dplyr::coalesce(Discards_ecoregion, 0) > 0
+      ),
+      ExclusionReason = ecoregion_exclusion_reason(usable, ShareUnavailable)
+    )
+
+  # Denominator/data coverage and excluded known regional quantities.
+  # Missing excluded values stay missing: excluded totals are *known* totals,
+  # not estimates of the unknown quantities.
+  coverage <- df_all |>
+    dplyr::group_by(Year, FisheriesGuild) |>
+    dplyr::summarise(
+      n_available = dplyr::n(),
+      n_included = sum(usable),
+      n_excluded = sum(!usable),
+      excluded_share_unavailable = sum(
+        ExclusionReason == "share unavailable", na.rm = TRUE
+      ),
+      excluded_no_positive_quantity = sum(
+        ExclusionReason == "quantity unavailable or non-positive", na.rm = TRUE
+      ),
+      n_included_missing_landings = sum(usable & is.na(Landings_ecoregion)),
+      n_included_missing_discards = sum(usable & is.na(Discards_ecoregion)),
+      n_excluded_missing_landings = sum(!usable & is.na(Landings_ecoregion)),
+      n_excluded_missing_catches = sum(!usable & is.na(Catches_ecoregion)),
+      n_excluded_missing_original_landings =
+        sum(!usable & is.na(Landings_original)),
+      n_excluded_missing_original_catches =
+        sum(!usable & is.na(Catches_original)),
+      excluded_landings_original_t = known_total(Landings_original[!usable]),
+      excluded_catches_original_t = known_total(Catches_original[!usable]),
+      excluded_landings_ecoregion_t =
+        known_total(Landings_ecoregion[!usable]),
+      excluded_catches_ecoregion_t =
+        known_total(Catches_ecoregion[!usable]),
+      # Denominator includes all KNOWN regional landings in this guild/year,
+      # whether included in the discard-rate calculation or excluded.
+      # Unknown regional landings are not implicitly counted as zero.
+      known_landings_ecoregion_t =
+        sum(Landings_ecoregion, na.rm = TRUE),
+      n_missing_landings_ecoregion = sum(is.na(Landings_ecoregion)),
+      excluded_share_known_landings_pct = {
+        known <- Landings_ecoregion[!is.na(Landings_ecoregion)]
+        if (!length(known) || sum(known) <= 0) {
+          NA_real_
+        } else {
+          100 * sum(Landings_ecoregion[!usable], na.rm = TRUE) / sum(known)
+        }
+      },
+      .groups = "drop"
+    )
+
+  # In non-paired mode, sums are calculated independently, as in v1.
+  included <- df_all |>
+    dplyr::filter(usable)
+
+  df5 <- included |>
+    dplyr::group_by(Year, FisheriesGuild) |>
+    dplyr::summarise(
+      guildLandings = sum(Landings_ecoregion, na.rm = TRUE) / 1000,
+      guildDiscards = sum(Discards_ecoregion, na.rm = TRUE) / 1000,
+      n_stocks = sum(dplyr::coalesce(Landings_ecoregion, 0) +
+                       dplyr::coalesce(Discards_ecoregion, 0) > 0),
+      stock_breakdown = list(build_stock_breakdown(
+        StockKeyLabel, Landings_ecoregion, Discards_ecoregion
+      )),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      guildRate = dplyr::if_else(
+        guildLandings + guildDiscards > 0,
+        guildDiscards / (guildLandings + guildDiscards),
+        NA_real_
+      )
+    ) |>
+    dplyr::filter(!is.na(guildRate)) |>
+    dplyr::left_join(
+      coverage, by = c("Year", "FisheriesGuild"),
+      relationship = "one-to-one"
+    ) |>
+    dplyr::arrange(FisheriesGuild, Year)
+
+  if (nrow(df5)) {
+    method_label <- if (complete_pairs) {
+      "Paired stocks only"
+    } else {
+      "Independent available values (v1 method)"
+    }
+    df5 <- df5 |>
+      dplyr::mutate(
+        hover_text = paste0(
+          "<b>", escape_html(FisheriesGuild), " — ", Year, "</b>",
+          "<br>Estimated ecoregion discard rate: ",
+          scales::percent(guildRate, accuracy = 0.01),
+          "<br>Landings: ", format_tonnes(guildLandings), " thousand t",
+          " | Discards: ", format_tonnes(guildDiscards), " thousand t",
+          "<br>Method: ", method_label,
+          "<br>Included stocks: ", n_included, " of ", n_available,
+          " (", n_excluded, " excluded)",
+          "<br>No ecoregion landings share available: ", excluded_share_unavailable,
+          "<br>No usable landings/discards (zero, missing, invalid or incomplete pair): ",
+          excluded_no_positive_quantity,
+          "<br>Excluded share of known ecoregion landings: ",
+          display_percent(excluded_share_known_landings_pct)
+        )
+      )
+
+    # Each plotted point carries its data as JSON, not pre-rendered HTML.
+    # This is also part of the return_data output for reproducibility.
+    df5$hover_payload <- vapply(seq_len(nrow(df5)), function(i) {
+      d <- df5[i, , drop = FALSE]
+      jsonlite::toJSON(
+        list(
+          guild = d$FisheriesGuild[[1]],
+          year = as.integer(d$Year[[1]]),
+          discard_rate_pct = 100 * d$guildRate[[1]],
+          landings_kt = d$guildLandings[[1]],
+          discards_kt = d$guildDiscards[[1]],
+          method = method_label,
+          n_available = as.integer(d$n_available[[1]]),
+          n_included = as.integer(d$n_included[[1]]),
+          n_excluded = as.integer(d$n_excluded[[1]]),
+          excluded_share_unavailable =
+            as.integer(d$excluded_share_unavailable[[1]]),
+          excluded_no_positive_quantity =
+            as.integer(d$excluded_no_positive_quantity[[1]]),
+          excluded_share_known_landings_pct =
+            d$excluded_share_known_landings_pct[[1]],
+          n_missing_landings_ecoregion =
+            as.integer(d$n_missing_landings_ecoregion[[1]]),
+          stocks = d$stock_breakdown[[1]]$stocks,
+          additional_stocks = as.integer(d$stock_breakdown[[1]]$n_more)
+        ),
+        auto_unbox = TRUE,
+        na = "null",
+        null = "null",
+        digits = 12
+      ) |> as.character()
+    }, character(1))
+  } else {
+    df5$hover_text <- character(0)
+    df5$hover_payload <- character(0)
+  }
+
+  # Absolutely no Plotly calls if the caller only wants the plotted data.
+  if (isTRUE(return_data)) return(df5)
+
+  if (!nrow(df5)) {
+    return(plotly::plot_ly(
+      x = numeric(0), y = numeric(0), type = "scatter", mode = "markers",
+      showlegend = FALSE, hoverinfo = "skip"
+    ) |>
+      plotly::layout(
+        xaxis = list(visible = FALSE),
+        yaxis = list(visible = FALSE),
+        annotations = list(list(
+          text = "No usable regional landings and discards available",
+          x = 0.5, y = 0.5, xref = "paper", yref = "paper",
+          showarrow = FALSE
+        ))
+      ))
+  }
+
+  # Stable guild-specific colours.
+  guild_colours <- c(
+    benthic = "#0072B2",
+    demersal = "#E69F00",
+    elasmobranch = "#009E73",
+    pelagic = "#CC79A7",
+    shellfish = "#D55E00"
+  )
+  guilds <- sort(unique(df5$FisheriesGuild))
+  other_guilds <- setdiff(guilds, names(guild_colours))
+  if (length(other_guilds)) {
+    guild_colours <- c(
+      guild_colours,
+      stats::setNames(
+        grDevices::hcl.colors(length(other_guilds), palette = "Dark 3"),
+        other_guilds
+      )
+    )
+  }
+
+  tick_size <- max(9, min(16, round(width_px / 55)))
+  axis_title_size <- max(10, min(20, round(width_px / 50)))
+  title_size <- max(12, min(22, round(width_px / 40)))
+  caption_size <- max(8, min(14, round(width_px / 70)))
+
+  p <- plotly::plot_ly()
+  for (guild in guilds) {
+    sub <- df5 |>
+      dplyr::filter(FisheriesGuild == guild) |>
+      tidyr::complete(Year = seq.int(2011, year - 1)) |>
+      dplyr::arrange(Year)
+
+    p <- plotly::add_trace(
+      p, data = sub,
+      x = ~Year, y = ~guildRate,
+      type = "scatter", mode = "lines+markers",
+      name = guild, showlegend = TRUE,
+      line = list(color = unname(guild_colours[guild]), width = 3),
+      marker = list(color = unname(guild_colours[guild]), size = 5),
+      customdata = ~hover_payload,
+      # 'none' hides native Plotly hover labels but preserves hover events.
+      hoverinfo = "none",
+      connectgaps = FALSE,
+      inherit = FALSE
+    )
+  }
+
+  region_title <- if (is.null(ecoregion) || !nzchar(as.character(ecoregion))) {
+    "Discard trends"
+  } else {
+    paste0("Discard trends (", ecoregion, ")")
+  }
+
+  p <- plotly::layout(
+    p,
+    hovermode = "closest",
+    xaxis = list(
+      title = list(text = "Year", font = list(size = axis_title_size)),
+      dtick = 1, tickfont = list(size = tick_size)
+    ),
+    yaxis = list(
+      title = list(text = "Discard rate", font = list(size = axis_title_size)),
+      tickformat = ".1%", rangemode = "tozero",
+      tickfont = list(size = tick_size)
+    ),
+    legend = list(
+      title = list(text = "<b>Fisheries guild:</b>"),
+      orientation = "h", x = 0, y = 1.02,
+      xanchor = "left", yanchor = "bottom"
+    ),
+    margin = list(l = 75, r = 30, t = 160, b = 125),
+    annotations = list(
+      list(
+        text = region_title, x = 0.01, y = 1, yshift = 140,
+        xref = "paper", yref = "paper", showarrow = FALSE,
+        xanchor = "left", yanchor = "top",
+        font = list(size = title_size, color = "black")
+      ),
+      list(
+        text = paste0("Ecoregion catch/landings/discard shares estimated from RDBES<br>",
+                      "ICES Stock Assessment Database, ",
+                format(Sys.Date(), "%d-%b-%y"), ". ICES, Copenhagen"),
+        x = 1, y = 0, xshift = 18, yshift = -75,
+        xref = "paper", yref = "paper",
+        xanchor = "right", yanchor = "top", showarrow = FALSE,
+        align = "right",
+        font = list(size = caption_size)
+      )
+    )
+  )
+
+  p <- plotly::config(
+    p, responsive = TRUE,
+    toImageButtonOptions = list(
+      filename = paste0(
+        if (is.null(ecoregion)) "Ecoregion" else ecoregion,
+        "_DiscardTrends_", format(Sys.Date(), "%d-%b-%y")
+      ),
+      format = "png", scale = 3
+    )
+   )
+
+  # Real HTML tooltip: safely render escaped labels and coloured CSS bars.
+  # htmlwidgets::onRender runs in the browser after Plotly is drawn.
+  js <- r"---(
+function(el, x) {
+  const tooltip = document.createElement('div');
+  tooltip.className = 'discard-v3-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.style.display = 'none';
+  tooltip.innerHTML = '<style>' +
+    '.discard-v3-tooltip{position:fixed;z-index:2147483000;width:400px;max-width:calc(100vw - 20px);max-height:calc(100vh - 20px);overflow-y:auto;box-sizing:border-box;padding:15px 16px;background:#fff;color:#243746;border:1px solid #d8e2ea;border-radius:12px;box-shadow:0 10px 32px rgba(15,33,45,.22);font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;pointer-events:auto;}' +
+    '.discard-v3-tooltip *{box-sizing:border-box;}' +
+    '.discard-v3-tooltip .dv3-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;}' +
+    '.discard-v3-tooltip .dv3-guild{font-size:16px;font-weight:700;line-height:1.2;}' +
+    '.discard-v3-tooltip .dv3-muted{color:#697b87;font-size:11px;}' +
+    '.discard-v3-tooltip .dv3-rate{text-align:right;white-space:nowrap;font-size:21px;font-weight:750;color:#17354c;line-height:1.15;}' +
+    '.discard-v3-tooltip .dv3-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0;}' +
+    '.discard-v3-tooltip .dv3-number{font-size:16px;font-weight:650;color:#203d51;}' +
+    '.discard-v3-tooltip .dv3-rule{height:1px;background:#e4eaf0;margin:12px 0;}' +
+    '.discard-v3-tooltip .dv3-coverage{background:#f2f6f9;border-radius:8px;padding:11px;}' +
+    '.discard-v3-tooltip .dv3-row{display:flex;justify-content:space-between;align-items:baseline;gap:8px;}' +
+    '.discard-v3-tooltip .dv3-section{font-size:12px;font-weight:700;margin-bottom:6px;}' +
+    '.discard-v3-tooltip .dv3-track{display:flex;width:100%;height:10px;background:#e9eef2;border-radius:4px;overflow:hidden;}' +
+    '.discard-v3-tooltip .dv3-track-coverage{margin-top:8px;height:11px;background:#e9eef2;}' +
+    '.discard-v3-tooltip .dv3-coverage-included{height:100%;background:#398b71;flex:none;}' +
+    '.discard-v3-tooltip .dv3-coverage-excluded{height:100%;background:#ce805a;flex:none;}' +
+    '.discard-v3-tooltip .dv3-coverage-labels{display:flex;justify-content:space-between;gap:8px;margin-top:5px;font-size:11px;color:#697b87;}' +
+    '.discard-v3-tooltip .dv3-L{height:100%;background:#6895af;}' +
+    '.discard-v3-tooltip .dv3-D{height:100%;background:#d77a52;}' +
+    '.discard-v3-tooltip .dv3-stock{padding:7px 0;border-bottom:1px solid #eef2f5;}' +
+    '.discard-v3-tooltip .dv3-stock:last-child{border-bottom:0;}' +
+    '.discard-v3-tooltip .dv3-code{font-size:11px;font-weight:650;overflow-wrap:anywhere;}' +
+    '.discard-v3-tooltip .dv3-details{font-size:10.5px;color:#687b86;margin-top:3px;}' +
+    '.discard-v3-tooltip .dv3-legend{display:flex;gap:10px;align-items:center;font-size:10.5px;color:#6b7b85;}' +
+    '.discard-v3-tooltip .dv3-key{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;}' +
+    '</style>';
+  const safe = function(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function(c) {
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  };
+  const isNumber = function(z) {
+    return typeof z === 'number' && Number.isFinite(z);
+  };
+  const fmt = function(z, digits) {
+    return isNumber(z) ? z.toLocaleString('en-GB', {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits
+    }) : 'NA';
+  };
+  const pct = function(z, digits) {
+    return isNumber(z) ? fmt(z, digits) + '%' : 'Not available';
+  };
+  const clamp = function(z) {
+    return isNumber(z) ? Math.max(0, Math.min(100, z)) : 0;
+  };
+
+  const build = function(d) {
+    const method = d.method === 'Paired stocks only' ?
+      'Paired stocks only' : 'Independent available values';
+
+    // Percentages refer only to regional landings with known values.
+    // A missing percentage is NOT equivalent to 0% excluded / 100% included.
+    const excludedKnownPct = isNumber(d.excluded_share_known_landings_pct) ?
+      clamp(d.excluded_share_known_landings_pct) : null;
+    const includedKnownPct = excludedKnownPct === null ?
+      null : 100 - excludedKnownPct;
+    const coverageBar = excludedKnownPct === null ?
+      '<div class="dv3-track dv3-track-coverage"></div>' +
+      '<div class="dv3-coverage-labels"><span>Share unavailable: no positive known regional landings</span></div>' :
+      '<div class="dv3-track dv3-track-coverage" role="img" aria-label="' +
+      pct(includedKnownPct, 1) + ' of known regional landings included; ' +
+      pct(excludedKnownPct, 1) + ' excluded">' +
+      '<div class="dv3-coverage-included" style="width:' + includedKnownPct + '%"></div>' +
+      '<div class="dv3-coverage-excluded" style="width:' + excludedKnownPct + '%"></div></div>' +
+      '<div class="dv3-coverage-labels"><span>' + pct(includedKnownPct, 1) +
+      ' included</span><span>' + pct(excludedKnownPct, 1) + ' excluded</span></div>';
+
+    let html = '<div class="dv3-head">' +
+      '<div><div class="dv3-guild">' + safe(d.guild) + '</div>' +
+      '<div class="dv3-muted">' + safe(d.year) + ' · Estimated regional quantities</div></div>' +
+      '<div><div class="dv3-rate">' + pct(d.discard_rate_pct, 2) + '</div>' +
+      '<div class="dv3-muted" style="text-align:right">Discard rate</div></div></div>' +
+      '<div class="dv3-grid">' +
+      '<div><div class="dv3-muted">Landings</div><div class="dv3-number">' + fmt(d.landings_kt, 2) + ' kt</div></div>' +
+      '<div><div class="dv3-muted">Discards</div><div class="dv3-number">' + fmt(d.discards_kt, 2) + ' kt</div></div></div>' +
+      '<div class="dv3-muted">Method: ' + safe(method) + '</div>' +
+      '<div class="dv3-rule"></div>' +
+      '<div class="dv3-coverage"><div class="dv3-row"><span class="dv3-section">Data coverage</span>' +
+      '<b>' + safe(d.n_included) + ' / ' + safe(d.n_available) + ' stocks</b></div>' +
+      '<div class="dv3-row dv3-muted"><span>Excluded share of known regional landings</span>' +
+      '<b>' + pct(d.excluded_share_known_landings_pct, 1) + '</b></div>' +
+      coverageBar +
+      '<div class="dv3-muted" style="margin-top:7px">' + safe(d.n_excluded) + ' excluded stock(s)' +
+      '<br>No ecoregion landings share available: ' + safe(d.excluded_share_unavailable) +
+      '<br>No usable landings/discards (zero, missing, invalid or incomplete pair): ' +
+      safe(d.excluded_no_positive_quantity) + '</div></div>' +
+      '<div class="dv3-rule"></div>' +
+      '<div class="dv3-row" style="align-items:center"><span class="dv3-section">Included stock composition</span>' +
+      '<span class="dv3-legend"><span><i class="dv3-key dv3-L"></i>Landings</span>' +
+      '<span><i class="dv3-key dv3-D"></i>Discards</span></span></div>' +
+      '<div class="dv3-muted" style="margin-bottom:4px">Bar length = share of included guild landings + discards</div>';
+
+    if (!Array.isArray(d.stocks) || d.stocks.length === 0) {
+      html += '<div class="dv3-muted">No positive stock quantities</div>';
+    } else {
+      d.stocks.forEach(function(s) {
+        html += '<div class="dv3-stock"><div class="dv3-row">' +
+          '<span class="dv3-code">' + safe(s.stock) + '</span>' +
+          '<span class="dv3-muted" style="white-space:nowrap">' + pct(s.share_pct, 1) + ' of guild</span></div>' +
+          '<div class="dv3-track" style="margin-top:5px">' +
+          '<div class="dv3-L" style="width:' + clamp(s.landings_share_pct) + '%"></div>' +
+          '<div class="dv3-D" style="width:' + clamp(s.discards_share_pct) + '%"></div></div>' +
+          '<div class="dv3-details">L: ' + fmt(s.landings_t, 0) + ' t  ·  D: ' +
+          fmt(s.discards_t, 0) + ' t  ·  Stock discard rate: ' +
+          (isNumber(s.rate_pct) ? pct(s.rate_pct, 1) : 'NA (incomplete)') + '</div></div>';
+      });
+    }
+    if (d.additional_stocks > 0) {
+      html += '<div class="dv3-muted" style="margin-top:7px">... and ' +
+        safe(d.additional_stocks) + ' more stocks</div>';
+    }
+    return html;
+  };
+
+  return {tooltip, build};
+}
+)---"
+
+  add_html_hover(p, js)
+}
+
+
+
+
+
+
+
+# #' Plot stock status trends by fisheries guild
+# #'
+# #' Creates a two-panel interactive Plotly visualization of stock status trends
+# #' over time, showing:
+# #' \itemize{
+# #'   \item Fishing pressure: F/F\eqn{_{MSY}}
+# #'   \item Biomass: SSB/MSY B\eqn{_{trigger}}
+# #' }
+# #'
+# #' The function supports two modes:
+# #' \itemize{
+# #'   \item \strong{Single guild:} plots individual stock trajectories with a guild-level mean
+# #'   \item \strong{All guilds:} plots one mean line per guild (no individual stocks)
+# #' }
+# #'
+# #' @param x Data frame containing stock assessment data. Must include:
+# #'   \itemize{
+# #'     \item \code{Year}
+# #'     \item \code{Value}
+# #'     \item \code{Metric} (e.g. "F_FMSY", "SSB_MSYBtrigger")
+# #'     \item \code{StockKeyLabel}
+# #'     \item \code{FisheriesGuild}
+# #'     \item \code{Proxy_is_proxy} (logical)
+# #'     \item \code{Proxy_name} (character)
+# #'   }
+# #' @param guild Character string specifying the fisheries guild to plot.
+# #'   Use \code{"All"} to display mean trends for all guilds.
+# #' @param return_data Logical. If \code{TRUE}, returns the processed data instead
+# #'   of a plot.
+# #' @param ecoregion Character string used in plot title and export filename.
+# #' @param per_panel_height Numeric. Height (in pixels) of each panel; total plot
+# #'   height is twice this value.
+# #'
+# #' @details
+# #' \strong{Single guild mode}
+# #' \itemize{
+# #'   \item Plots individual stock trajectories
+# #'   \item Solid lines = observed values
+# #'   \item Dotted lines = proxy-based estimates
+# #'   \item Includes a thick black mean line
+# #'   \item Interactive highlighting allows selecting stocks across panels
+# #' }
+# #'
+# #' \strong{All guilds mode}
+# #' \itemize{
+# #'   \item Uses only rows where \code{StockKeyLabel == "Mean"}
+# #'   \item Plots one line per guild
+# #'   \item No stock-level detail is shown
+# #' }
+# #'
+# #' In both modes:
+# #' \itemize{
+# #'   \item A horizontal reference line at y = 1 indicates sustainability thresholds
+# #'   \item The final year of each mean series is set to \code{NA} (to avoid misleading projections)
+# #'   \item Panels share the same x-axis (Year)
+# #'   \item Hover text provides contextual information
+# #' }
+# #'
+# #' @return
+# #' \itemize{
+# #'   \item A Plotly object (default)
+# #'   \item A data frame if \code{return_data = TRUE}
+# #' }
+# #'
+# #' @seealso
+# #' \code{\link{make_all_guilds_panel}},
+# #' \code{\link{make_single_guild_panel}},
+# #' \code{\link{build_final_plot}}
+# #'
+# #' @examples
+# #' \dontrun{
+# #' # Single guild
+# #' plot_stock_trends(df, guild = "Demersal", ecoregion = "NrS")
+# #'
+# #' # All guilds
+# #' plot_stock_trends(df, guild = "All", ecoregion = "NrS")
+# #' }
+# prepare_status_trend_data <- function(annual) {
+#   stopifnot(!anyDuplicated(annual[c("StockKeyLabel", "Year")]))
+#   stocks <- dplyr::bind_rows(
+#     annual |> dplyr::transmute(
+#       Year, StockKeyLabel, FisheriesGuild, Metric = "F_FMSY",
+#       Value = dplyr::if_else(is.finite(FMSY) & FMSY > 0, F_FMSY, NA_real_),
+#       Proxy_is_proxy = FMSY_is_proxy %in% TRUE,
+#       Proxy_name = as.character(FMSY_proxy_name)
+#     ),
+#     annual |> dplyr::transmute(
+#       Year, StockKeyLabel, FisheriesGuild, Metric = "SSB_MSYBtrigger",
+#       Value = dplyr::if_else(is.finite(MSYBtrigger) & MSYBtrigger > 0,
+#                              SSB_MSYBtrigger, NA_real_),
+#       Proxy_is_proxy = MSYB_is_proxy %in% TRUE,
+#       Proxy_name = as.character(MSYB_proxy_name)
+#     )
+#   ) |>
+#     dplyr::filter(is.finite(Year), is.finite(Value), Value >= 0,
+#                   !is.na(StockKeyLabel), nzchar(StockKeyLabel),
+#                   !is.na(FisheriesGuild), nzchar(FisheriesGuild))
+#   means <- stocks |>
+#     dplyr::group_by(Year, FisheriesGuild, Metric) |>
+#     dplyr::summarise(Value = mean(Value), .groups = "drop") |>
+#     dplyr::mutate(StockKeyLabel = "Mean", Proxy_is_proxy = FALSE,
+#                   Proxy_name = NA_character_)
+#   dplyr::bind_rows(stocks, means)
+# }
+
+# plot_stock_trends <- function(x,
+#                               guild,
+#                               return_data = FALSE,
+#                               ecoregion = NULL,
+#                               per_panel_height = 330) {
+#   safe_min <- function(v, pad = 0) {
+#     m <- suppressWarnings(base::min(v, na.rm = TRUE))
+#     if (is.infinite(m)) 0 else m - pad
+#   }
+
+#   safe_max <- function(v, pad = 0) {
+#     m <- suppressWarnings(base::max(v, na.rm = TRUE))
+#     if (is.infinite(m)) 1 else m + pad
+#   }
+
+#   rand_id <- function(prefix = "stockkey_") {
+#     paste0(prefix, paste(sample(c(letters, LETTERS, 0:9), 12, TRUE), collapse = ""))
+#   }
+
+#   metric_map <- c(
+#     "F_FMSY" = "F/Fref",
+#     "SSB_MSYBtrigger" = "B/Bref"
+#   )
+
+
+
+#   # ------------------------------------------------------------
+#   # branch 1: All guilds
+#   # ------------------------------------------------------------
+#   if (!is.null(guild) && guild == "All") {
+#     df_all <- x %>%
+#       dplyr::filter(
+#         Metric %in% names(metric_map),
+#         StockKeyLabel == "Mean"
+#       ) %>%
+#       dplyr::mutate(
+#         MetricLabel = dplyr::recode(Metric, !!!metric_map)
+#       )
+
+#     if (nrow(df_all) == 0) {
+#       return(
+#         plotly::plot_ly() %>%
+#           plotly::layout(
+#             xaxis = list(visible = FALSE),
+#             yaxis = list(visible = FALSE),
+#             annotations = list(list(
+#               text = "No mean data available across guilds",
+#               xref = "paper", yref = "paper", x = 0.5, y = 0.5,
+#               showarrow = FALSE, font = list(size = 20)
+#             ))
+#           )
+#       )
+#     }
+
+#     # Null last-year mean within each guild and metric
+#     df_all <- df_all %>%
+#       dplyr::group_by(FisheriesGuild, Metric) %>%
+#       dplyr::mutate(
+#         last_year = suppressWarnings(max(Year, na.rm = TRUE)),
+#         Value = dplyr::if_else(Year == last_year, NA_real_, Value)
+#       ) %>%
+#       dplyr::ungroup() %>%
+#       dplyr::select(-last_year)
+
+#     if (return_data) {
+#       return(df_all)
+#     }
+
+#     guild_names <- sort(unique(df_all$FisheriesGuild))
+#     guild_cols <- grDevices::hcl.colors(length(guild_names), palette = "Temps")
+#     names(guild_cols) <- guild_names
+
+#     plot1 <- make_all_guilds_panel(
+#       df_mean = df_all,
+#       metric_raw = "F_FMSY",
+#       yaxis_title = metric_map[["F_FMSY"]],
+#       colors = guild_cols,
+#       showlegend = TRUE
+#     )
+
+#     plot2 <- make_all_guilds_panel(
+#       df_mean = df_all,
+#       metric_raw = "SSB_MSYBtrigger",
+#       yaxis_title = metric_map[["SSB_MSYBtrigger"]],
+#       colors = guild_cols,
+#       showlegend = FALSE
+#     )
+
+#     return(
+#       build_final_plot(
+#         plot1 = plot1,
+#         plot2 = plot2,
+#         title_text = paste0("Status trends: All guilds (", ecoregion, ")"),
+#         legend_title = "<b>Guild:</b>",
+#         filename_stub = paste0(
+#           ecoregion, "_StatusTrends_AllGuilds_",
+#           base::format(base::Sys.Date(), "%d-%b-%y")
+#         )
+#       )
+#     )
+#   }
+
+#   # ------------------------------------------------------------
+#   # branch 2: one selected guild
+#   # ------------------------------------------------------------
+#   df <- dplyr::filter(x, FisheriesGuild == guild)
+
+#   if (nrow(df) == 0) {
+#     return(
+#       plotly::plot_ly() %>%
+#         plotly::layout(
+#           xaxis = list(visible = FALSE),
+#           yaxis = list(visible = FALSE),
+#           annotations = list(list(
+#             text = paste0("No data available for guild: ", guild),
+#             xref = "paper", yref = "paper", x = 0.5, y = 0.5,
+#             showarrow = FALSE, font = list(size = 20)
+#           ))
+#         )
+#     )
+#   }
+
+#   adj_names <- sort(setdiff(unique(df$StockKeyLabel), "Mean"))
+#   values <- grDevices::hcl.colors(length(adj_names), palette = "Temps")
+#   names(values) <- adj_names
+#   values <- c(values, c(MEAN = "black"))
+
+#   df <- df %>%
+#     dplyr::filter(Metric %in% names(metric_map)) %>%
+#     dplyr::mutate(MetricLabel = dplyr::recode(Metric, !!!metric_map))
+
+#   mean_df <- dplyr::filter(df, StockKeyLabel == "Mean")
+
+#   last_year_F <- suppressWarnings(max(mean_df$Year[mean_df$Metric == "F_FMSY"], na.rm = TRUE))
+#   last_year_B <- suppressWarnings(max(mean_df$Year[mean_df$Metric == "SSB_MSYBtrigger"], na.rm = TRUE))
+
+#   if (is.finite(last_year_F)) {
+#     mean_df$Value[mean_df$Metric == "F_FMSY" & mean_df$Year == last_year_F] <- NA_real_
+#   }
+#   if (is.finite(last_year_B)) {
+#     mean_df$Value[mean_df$Metric == "SSB_MSYBtrigger" & mean_df$Year == last_year_B] <- NA_real_
+#   }
+
+#   df2 <- dplyr::filter(df, StockKeyLabel != "Mean") %>%
+#     dplyr::mutate(
+#       hover = dplyr::if_else(
+#         Proxy_is_proxy & !is.na(Proxy_name),
+#         paste0(
+#           "Stock: ", StockKeyLabel,
+#           "<br>Year: ", Year,
+#           "<br>", MetricLabel, ": ", signif(Value, 4),
+#           "<br>Proxy: ", Proxy_name
+#         ),
+#         paste0(
+#           "Stock: ", StockKeyLabel,
+#           "<br>Year: ", Year,
+#           "<br>", MetricLabel, ": ", signif(Value, 4)
+#         )
+#       )
+#     )
+
+#   stocks_top <- unique(dplyr::filter(df2, Metric == "F_FMSY")$StockKeyLabel)
+#   stocks_bottom <- unique(dplyr::filter(df2, Metric == "SSB_MSYBtrigger")$StockKeyLabel)
+#   only_bottom <- setdiff(stocks_bottom, stocks_top)
+
+#   ct_group <- rand_id()
+
+#   plot1 <- make_single_guild_panel(
+#     df2 = df2,
+#     mean_df = mean_df,
+#     df_all_years = df,
+#     metric_raw = "F_FMSY",
+#     yaxis_title = metric_map[["F_FMSY"]],
+#     legend_stocks = stocks_top,
+#     values = values,
+#     ct_group = ct_group,
+#     show_mean_in_legend = TRUE
+#   )
+
+#   plot2 <- make_single_guild_panel(
+#     df2 = df2,
+#     mean_df = mean_df,
+#     df_all_years = df,
+#     metric_raw = "SSB_MSYBtrigger",
+#     yaxis_title = metric_map[["SSB_MSYBtrigger"]],
+#     legend_stocks = only_bottom,
+#     values = values,
+#     ct_group = ct_group,
+#     show_mean_in_legend = FALSE
+#   )
+
+#   final_plot <- build_final_plot(
+#     plot1 = plot1,
+#     plot2 = plot2,
+#     title_text = paste0("Status trends: ", guild, " (", ecoregion, ")"),
+#     legend_title = "<b>Stock code:</b>",
+#     filename_stub = paste0(
+#       ecoregion, "_StatusTrends_", guild, "_",
+#       base::format(base::Sys.Date(), "%d-%b-%y")
+#     )
+#   ) %>%
+#     plotly::highlight(
+#       on = "plotly_click",
+#       off = "plotly_doubleclick",
+#       color = NULL,
+#       opacityDim = 0.3,
+#       selected = plotly::attrs_selected(
+#         opacity = 1,
+#         line = list(width = 6)
+#       )
+#     )
+
+#   if (return_data) df else final_plot
+# }
+
+
+
+
+
+
+# #' Build final two-panel Plotly layout
+# #'
+# #' Combines two Plotly panels into a vertically stacked subplot and applies
+# #' shared layout elements (axes, legend, annotations, export options).
+# #'
+# #' @param plot1 A Plotly object representing the upper panel (typically F/F_MSY).
+# #' @param plot2 A Plotly object representing the lower panel (typically SSB/Btrigger).
+# #' @param title_text Character string. Title annotation shown at the top-left of the figure.
+# #' @param legend_title Character string. Title displayed above the legend.
+# #' @param filename_stub Character string. Base filename used when exporting the plot as an image.
+# #'
+# #' @details
+# #' This helper standardizes figure appearance across use cases:
+# #' \itemize{
+# #'   \item Stacks panels with shared x-axis (Year)
+# #'   \item Applies consistent font sizes and margins
+# #'   \item Adds a data source annotation (ICES)
+# #'   \item Adds a contextual title annotation
+# #'   \item Configures export settings (PNG, high resolution)
+# #' }
+# #'
+# #' The height of the combined plot is controlled externally via
+# #' \code{per_panel_height}.
+# #'
+# #' @return A Plotly object with combined panels and configured layout.
+# build_final_plot <- function(plot1, plot2, title_text, legend_title, filename_stub, per_panel_height = 330) {
+#   plotly::subplot(plot1, plot2, nrows = 2, shareX = TRUE, titleY = TRUE) %>%
+#     plotly::layout(
+#       height = per_panel_height * 2,
+#       xaxis = list(
+#         title = "Year",
+#         titlefont = list(size = 16),
+#         tickfont = list(size = 14)
+#       ),
+#       margin = list(b = 100, r = 50),
+#       legend = list(
+#         title = list(text = legend_title, font = list(size = 16)),
+#         orientation = "h",
+#         x = 0.5, y = 1.05, xanchor = "center", yanchor = "bottom",
+#         font = list(size = 16)
+#       ),
+#       annotations = list(
+#         list(
+#           x = 1, y = -0.17, xref = "paper", yref = "paper",
+#           text = paste0(
+#             "ICES Stock Assessment Database, ",
+#             base::format(base::Sys.Date(), "%d-%b-%y"),
+#             ". ICES, Copenhagen"
+#           ),
+#           showarrow = FALSE,
+#           xanchor = "right",
+#           yanchor = "bottom"
+#         ),
+#         list(
+#           text = title_text,
+#           x = 0.01, y = 0.99, xref = "paper", yref = "paper",
+#           showarrow = FALSE,
+#           xanchor = "left",
+#           yanchor = "top",
+#           font = list(size = 18, color = "black")
+#         )
+#       )
+#     ) %>%
+#     plotly::config(
+#       responsive = TRUE,
+#       toImageButtonOptions = list(
+#         filename = filename_stub,
+#         format   = "png",
+#         scale    = 3
+#       )
+#     )
+# }
+
+# #' Create panel for "All guilds" view (mean lines only)
+# #'
+# #' Generates a single Plotly panel showing one line per fisheries guild,
+# #' using pre-computed mean values (StockKeyLabel == "Mean").
+# #'
+# #' @param df_mean Data frame containing mean time series for each guild.
+# #'   Must include columns: \code{Year}, \code{Value}, \code{Metric}, \code{FisheriesGuild}.
+# #' @param metric_raw Character string. Metric identifier (e.g. "F_FMSY", "SSB_MSYBtrigger").
+# #' @param yaxis_title Character string. Label for the y-axis (HTML allowed).
+# #' @param colors Named character vector mapping \code{FisheriesGuild} to colors.
+# #' @param showlegend Logical. Whether to display legend entries for this panel.
+# #'
+# #' @details
+# #' This helper is used when \code{guild == "All"}:
+# #' \itemize{
+# #'   \item Only mean series are plotted (no individual stocks)
+# #'   \item Each guild is represented as one line
+# #'   \item Lines are grouped and colored by \code{FisheriesGuild}
+# #'   \item A horizontal reference line at y = 1 is added
+# #'   \item A bounding box frame is drawn around the panel
+# #' }
+# #'
+# #' Hover text includes guild, year, and metric value.
+# #'
+# #' @return A Plotly object representing a single panel.
+# make_all_guilds_panel <- function(df_mean, metric_raw, yaxis_title, colors, showlegend = TRUE) {
+#   panel <- df_mean %>%
+#     dplyr::filter(Metric == metric_raw)
+
+#   plotly::plot_ly() %>%
+#     plotly::add_lines(
+#       data = panel,
+#       x = ~Year, y = ~Value,
+#       split = ~FisheriesGuild,
+#       color = ~FisheriesGuild,
+#       colors = colors,
+#       legendgroup = ~FisheriesGuild,
+#       name = ~FisheriesGuild,
+#       line = list(width = 3),
+#       text = ~ paste0(
+#         "Guild: ", FisheriesGuild,
+#         "<br>Year: ", Year,
+#         "<br>", yaxis_title, ": ", base::signif(Value, 4)
+#       ),
+#       hovertemplate = "%{text}<extra></extra>",
+#       showlegend = showlegend
+#     ) %>%
+#     plotly::layout(
+#       yaxis = list(
+#         title = yaxis_title,
+#         titlefont = list(size = 16),
+#         tickfont = list(size = 14),
+#         zeroline = TRUE,
+#         zerolinecolor = "black",
+#         zerolinewidth = 2
+#       ),
+#       shapes = list(
+#         list(
+#           type = "line",
+#           x0 = min(df_mean$Year, na.rm = TRUE),
+#           x1 = max(df_mean$Year, na.rm = TRUE) + 1,
+#           y0 = 1, y1 = 1,
+#           line = list(color = "#000000", width = 1)
+#         ),
+#         list(
+#           type = "rect", xref = "paper", yref = "paper",
+#           x0 = 0, x1 = 1, y0 = 0, y1 = 1,
+#           line = list(color = "black", width = 1),
+#           fillcolor = "rgba(0,0,0,0)"
+#         )
+#       )
+#     )
+# }
+
+# #' Create panel for a single guild (stock-level lines + mean)
+# #'
+# #' Generates a Plotly panel for a selected fisheries guild, showing:
+# #' individual stock trajectories and the guild-level mean.
+# #'
+# #' @param df2 Data frame of non-mean stock observations.
+# #'   Must include: \code{Year}, \code{Value}, \code{Metric}, \code{StockKeyLabel},
+# #'   \code{Proxy_is_proxy}, \code{hover}.
+# #' @param mean_df Data frame containing mean time series (StockKeyLabel == "Mean").
+# #' @param df_all_years Data frame used only to determine x-axis range (Year).
+# #' @param metric_raw Character string. Metric identifier.
+# #' @param yaxis_title Character string. Label for the y-axis.
+# #' @param legend_stocks Character vector of stock IDs to include in the legend.
+# #'   Other stocks are plotted but hidden from the legend.
+# #' @param values Named character vector mapping stock IDs to colors.
+# #' @param ct_group Character string. Crosstalk group ID for linked highlighting.
+# #' @param show_mean_in_legend Logical. Whether to include the mean line in the legend.
+# #'
+# #' @details
+# #' This helper implements the main plotting logic for individual guilds:
+# #' \itemize{
+# #'   \item Splits stocks into proxy vs non-proxy:
+# #'     \itemize{
+# #'       \item Solid lines = observed data
+# #'       \item Dotted lines = proxy-based data
+# #'     }
+# #'   \item Separates legend-visible and legend-hidden traces
+# #'   \item Uses \code{highlight_key()} to enable cross-panel interaction
+# #'   \item Applies dimming for unselected traces
+# #'   \item Adds a thick black mean line
+# #'   \item Adds reference line at y = 1 and panel border
+# #' }
+# #'
+# #' The function assumes that proxy status is constant within each stock time series.
+# #'
+# #' @return A Plotly object representing a single panel.
+# make_single_guild_panel <- function(df2, mean_df, df_all_years, metric_raw, yaxis_title,
+#                                     legend_stocks, values, ct_group, show_mean_in_legend = TRUE) {
+#   panel <- dplyr::filter(df2, Metric == metric_raw)
+
+#   np <- panel %>%
+#     dplyr::group_by(StockKeyLabel) %>%
+#     dplyr::filter(!base::any(Proxy_is_proxy, na.rm = TRUE)) %>%
+#     dplyr::ungroup()
+
+#   pr <- panel %>%
+#     dplyr::group_by(StockKeyLabel) %>%
+#     dplyr::filter(base::any(Proxy_is_proxy, na.rm = TRUE)) %>%
+#     dplyr::ungroup()
+
+#   np_on <- dplyr::filter(np, StockKeyLabel %in% legend_stocks)
+#   np_off <- dplyr::filter(np, !StockKeyLabel %in% legend_stocks)
+#   pr_on <- dplyr::filter(pr, StockKeyLabel %in% legend_stocks)
+#   pr_off <- dplyr::filter(pr, !StockKeyLabel %in% legend_stocks)
+
+#   hk_np_on <- plotly::highlight_key(np_on, ~StockKeyLabel, group = ct_group)
+#   hk_np_off <- plotly::highlight_key(np_off, ~StockKeyLabel, group = ct_group)
+#   hk_pr_on <- plotly::highlight_key(pr_on, ~StockKeyLabel, group = ct_group)
+#   hk_pr_off <- plotly::highlight_key(pr_off, ~StockKeyLabel, group = ct_group)
+
+#   plotly::plot_ly() %>%
+#     plotly::add_lines(
+#       data = hk_np_on,
+#       x = ~Year, y = ~Value,
+#       split = ~StockKeyLabel,
+#       color = ~StockKeyLabel, colors = values,
+#       legendgroup = ~StockKeyLabel, name = ~StockKeyLabel,
+#       line = list(width = 3, dash = "solid"),
+#       unselected = list(line = list(opacity = 0.3)),
+#       text = ~hover, hovertemplate = "%{text}<extra></extra>",
+#       showlegend = TRUE
+#     ) %>%
+#     plotly::add_lines(
+#       data = hk_np_off,
+#       x = ~Year, y = ~Value,
+#       split = ~StockKeyLabel,
+#       color = ~StockKeyLabel, colors = values,
+#       legendgroup = ~StockKeyLabel, name = ~StockKeyLabel,
+#       line = list(width = 3, dash = "solid"),
+#       unselected = list(line = list(opacity = 0.3)),
+#       text = ~hover, hovertemplate = "%{text}<extra></extra>",
+#       showlegend = FALSE
+#     ) %>%
+#     plotly::add_lines(
+#       data = hk_pr_on,
+#       x = ~Year, y = ~Value,
+#       split = ~StockKeyLabel,
+#       color = ~StockKeyLabel, colors = values,
+#       legendgroup = ~StockKeyLabel, name = ~StockKeyLabel,
+#       line = list(width = 3, dash = "dot"),
+#       unselected = list(line = list(opacity = 0.3)),
+#       text = ~hover, hovertemplate = "%{text}<extra></extra>",
+#       showlegend = TRUE
+#     ) %>%
+#     plotly::add_lines(
+#       data = hk_pr_off,
+#       x = ~Year, y = ~Value,
+#       split = ~StockKeyLabel,
+#       color = ~StockKeyLabel, colors = values,
+#       legendgroup = ~StockKeyLabel, name = ~StockKeyLabel,
+#       line = list(width = 3, dash = "dot"),
+#       unselected = list(line = list(opacity = 0.3)),
+#       text = ~hover, hovertemplate = "%{text}<extra></extra>",
+#       showlegend = FALSE
+#     ) %>%
+#     plotly::add_lines(
+#       data = dplyr::filter(mean_df, Metric == metric_raw),
+#       x = ~Year, y = ~Value,
+#       name = "Mean", legendgroup = "Mean",
+#       line = list(color = "black", width = 5),
+#       showlegend = show_mean_in_legend,
+#       inherit = FALSE
+#     ) %>%
+#     plotly::layout(
+#       yaxis = list(
+#         title = yaxis_title,
+#         titlefont = list(size = 16),
+#         tickfont = list(size = 14),
+#         zeroline = TRUE, zerolinecolor = "black", zerolinewidth = 2
+#       ),
+#       shapes = list(
+#         list(
+#           type = "line",
+#           x0 = min(df_all_years$Year, na.rm = TRUE),
+#           x1 = max(df_all_years$Year, na.rm = TRUE) + 1,
+#           y0 = 1, y1 = 1,
+#           line = list(color = "#000000", width = 1)
+#         ),
+#         list(
+#           type = "rect", xref = "paper", yref = "paper",
+#           x0 = 0, x1 = 1, y0 = 0, y1 = 1,
+#           line = list(color = "black", width = 1),
+#           fillcolor = "rgba(0,0,0,0)"
+#         )
+#       )
+#     )
+# }
+
+
+
+
+
+
+#' Plot stock status trends by fisheries guild
+#'
+#' Creates a two-panel interactive Plotly visualization of stock status trends
+#' over time, showing:
+#' \itemize{
+#'   \item Fishing pressure: F/F\eqn{_{MSY}}
+#'   \item Biomass: SSB/MSY B\eqn{_{trigger}}
+#' }
+#'
+#' The function supports two modes:
+#' \itemize{
+#'   \item \strong{Single guild:} plots individual stock trajectories with a guild-level mean
+#'   \item \strong{All guilds:} plots one mean line per guild (no individual stocks)
+#' }
+#'
+#' @param x Data frame containing stock assessment data. Must include:
+#'   \itemize{
+#'     \item \code{Year}
+#'     \item \code{Value}
+#'     \item \code{Metric} (e.g. "F_FMSY", "SSB_MSYBtrigger")
+#'     \item \code{StockKeyLabel}
+#'     \item \code{FisheriesGuild}
+#'     \item \code{Proxy_is_proxy} (logical)
+#'     \item \code{Proxy_name} (character)
+#'   }
+#' @param guild Character string specifying the fisheries guild to plot.
+#'   Use \code{"All"} to display mean trends for all guilds.
+#' @param return_data Logical. If \code{TRUE}, returns the processed data instead
+#'   of a plot.
+#' @param ecoregion Character string used in plot title and export filename.
+#' @param per_panel_height Numeric. Fallback height (in pixels) of each panel
+#'   when the display does not supply a height. Saved HTML fills its iframe.
+#'
+#' @details
+#' \strong{Single guild mode}
+#' \itemize{
+#'   \item Plots individual stock trajectories
+#'   \item Solid lines = observed values
+#'   \item Dotted lines = proxy-based estimates
+#'   \item Includes a thick black mean line
+#'   \item Interactive highlighting allows selecting stocks across panels
+#' }
+#'
+#' \strong{All guilds mode}
+#' \itemize{
+#'   \item Uses only rows where \code{StockKeyLabel == "Mean"}
+#'   \item Plots one line per guild
+#'   \item No stock-level detail is shown
+#' }
+#'
+#' In both modes:
+#' \itemize{
+#'   \item A horizontal reference line at y = 1 indicates sustainability thresholds
+#'   \item The final year of each mean series is set to \code{NA} (to avoid misleading projections)
+#'   \item Panels share the same x-axis (Year)
+#'   \item Hover text provides contextual information
+#' }
+#'
+#' @return
+#' \itemize{
+#'   \item A Plotly object (default)
+#'   \item A data frame if \code{return_data = TRUE}
+#' }
+#'
+#' @seealso
+#' \code{\link{make_all_guilds_panel}},
+#' \code{\link{make_single_guild_panel}},
+#' \code{\link{build_final_plot}}
+#'
+#' @examples
+#' \dontrun{
+#' # Single guild
+#' plot_stock_trends(df, guild = "Demersal", ecoregion = "NrS")
+#'
+#' # All guilds
+#' plot_stock_trends(df, guild = "All", ecoregion = "NrS")
+#' }
+prepare_status_trend_data <- function(annual) {
+  stopifnot(!anyDuplicated(annual[c("StockKeyLabel", "Year")]))
+  stocks <- dplyr::bind_rows(
+    annual |> dplyr::transmute(
+      Year, StockKeyLabel, FisheriesGuild,
+      Metric = "F_FMSY",
+      Value = dplyr::if_else(is.finite(FMSY) & FMSY > 0, F_FMSY, NA_real_),
+      Proxy_is_proxy = FMSY_is_proxy %in% TRUE,
+      Proxy_name = as.character(FMSY_proxy_name)
+    ),
+    annual |> dplyr::transmute(
+      Year, StockKeyLabel, FisheriesGuild,
+      Metric = "SSB_MSYBtrigger",
+      Value = dplyr::if_else(is.finite(MSYBtrigger) & MSYBtrigger > 0,
+        SSB_MSYBtrigger, NA_real_
+      ),
+      Proxy_is_proxy = MSYB_is_proxy %in% TRUE,
+      Proxy_name = as.character(MSYB_proxy_name)
+    )
+  ) |>
+    dplyr::filter(
+      is.finite(Year), is.finite(Value), Value >= 0,
+      !is.na(StockKeyLabel), nzchar(StockKeyLabel),
+      !is.na(FisheriesGuild), nzchar(FisheriesGuild)
+    )
+  means <- stocks |>
+    dplyr::group_by(Year, FisheriesGuild, Metric) |>
+    dplyr::summarise(
+      Value = if (dplyr::n_distinct(StockKeyLabel) >= 2L) {
+        mean(Value)
+      } else {
+        NA_real_
+      },
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      StockKeyLabel = "Mean", Proxy_is_proxy = FALSE,
+      Proxy_name = NA_character_
+    )
+  dplyr::bind_rows(stocks, means)
+}
+
+plot_stock_trends <- function(x,
+                              guild,
+                              return_data = FALSE,
+                              ecoregion = NULL,
+                              per_panel_height = 330) {
+  safe_min <- function(v, pad = 0) {
+    m <- suppressWarnings(base::min(v, na.rm = TRUE))
+    if (is.infinite(m)) 0 else m - pad
+  }
+
+  safe_max <- function(v, pad = 0) {
+    m <- suppressWarnings(base::max(v, na.rm = TRUE))
+    if (is.infinite(m)) 1 else m + pad
+  }
+
+  rand_id <- function(prefix = "stockkey_") {
+    paste0(prefix, paste(sample(c(letters, LETTERS, 0:9), 12, TRUE), collapse = ""))
+  }
+
+  metric_map <- c(
+    "F_FMSY" = "F/Fref",
+    "SSB_MSYBtrigger" = "B/Bref"
+  )
+
+
+
+  # ------------------------------------------------------------
+  # branch 1: All guilds
+  # ------------------------------------------------------------
+  if (!is.null(guild) && guild == "All") {
+    df_all <- x %>%
+      dplyr::filter(
+        Metric %in% names(metric_map),
+        StockKeyLabel == "Mean"
+      ) %>%
+      dplyr::mutate(
+        MetricLabel = dplyr::recode(Metric, !!!metric_map)
+      )
+
+    if (nrow(df_all) == 0) {
+      return(
+        plotly::plot_ly() %>%
+          plotly::layout(
+            xaxis = list(visible = FALSE),
+            yaxis = list(visible = FALSE),
+            annotations = list(list(
+              text = "No mean data available across guilds",
+              xref = "paper", yref = "paper", x = 0.5, y = 0.5,
+              showarrow = FALSE, font = list(size = 20)
+            ))
+          )
+      )
+    }
+
+    # Null last-year mean within each guild and metric
+    df_all <- df_all %>%
+      dplyr::group_by(FisheriesGuild, Metric) %>%
+      dplyr::mutate(
+        last_year = suppressWarnings(max(Year, na.rm = TRUE)),
+        Value = dplyr::if_else(Year == last_year, NA_real_, Value)
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(-last_year)
+
+    if (return_data) {
+      return(df_all)
+    }
+
+    guild_names <- sort(unique(df_all$FisheriesGuild))
+    guild_cols <- grDevices::hcl.colors(length(guild_names), palette = "Temps")
+    names(guild_cols) <- guild_names
+
+    plot1 <- make_all_guilds_panel(
+      df_mean = df_all,
+      metric_raw = "F_FMSY",
+      yaxis_title = metric_map[["F_FMSY"]],
+      colors = guild_cols,
+      showlegend = TRUE
+    )
+
+    plot2 <- make_all_guilds_panel(
+      df_mean = df_all,
+      metric_raw = "SSB_MSYBtrigger",
+      yaxis_title = metric_map[["SSB_MSYBtrigger"]],
+      colors = guild_cols,
+      showlegend = FALSE
+    )
+
+    return(
+      build_final_plot(
+        plot1 = plot1,
+        plot2 = plot2,
+        title_text = paste0("Status trends: All guilds (", ecoregion, ")"),
+        legend_title = "<b>Guild:</b>",
+        filename_stub = paste0(
+          ecoregion, "_StatusTrends_AllGuilds_",
+          base::format(base::Sys.Date(), "%d-%b-%y")
+        ),
+        per_panel_height = per_panel_height
+      )
+    )
+  }
+
+  # ------------------------------------------------------------
+  # branch 2: one selected guild
+  # ------------------------------------------------------------
+  df <- dplyr::filter(x, FisheriesGuild == guild)
+
+  if (nrow(df) == 0) {
+    return(
+      plotly::plot_ly() %>%
+        plotly::layout(
+          xaxis = list(visible = FALSE),
+          yaxis = list(visible = FALSE),
+          annotations = list(list(
+            text = paste0("No data available for guild: ", guild),
+            xref = "paper", yref = "paper", x = 0.5, y = 0.5,
+            showarrow = FALSE, font = list(size = 20)
+          ))
+        )
+    )
+  }
+
+  adj_names <- sort(setdiff(unique(df$StockKeyLabel), "Mean"))
+  values <- grDevices::hcl.colors(length(adj_names), palette = "Temps")
+  names(values) <- adj_names
+  values <- c(values, c(MEAN = "black"))
+
+  df <- df %>%
+    dplyr::filter(Metric %in% names(metric_map)) %>%
+    dplyr::mutate(MetricLabel = dplyr::recode(Metric, !!!metric_map))
+
+  mean_df <- dplyr::filter(df, StockKeyLabel == "Mean")
+
+  last_year_F <- suppressWarnings(max(mean_df$Year[mean_df$Metric == "F_FMSY"], na.rm = TRUE))
+  last_year_B <- suppressWarnings(max(mean_df$Year[mean_df$Metric == "SSB_MSYBtrigger"], na.rm = TRUE))
+
+  if (is.finite(last_year_F)) {
+    mean_df$Value[mean_df$Metric == "F_FMSY" & mean_df$Year == last_year_F] <- NA_real_
+  }
+  if (is.finite(last_year_B)) {
+    mean_df$Value[mean_df$Metric == "SSB_MSYBtrigger" & mean_df$Year == last_year_B] <- NA_real_
+  }
+
+  df2 <- dplyr::filter(df, StockKeyLabel != "Mean") %>%
+    dplyr::mutate(
+      hover = dplyr::if_else(
+        Proxy_is_proxy & !is.na(Proxy_name),
+        paste0(
+          "Stock: ", StockKeyLabel,
+          "<br>Year: ", Year,
+          "<br>", MetricLabel, ": ", signif(Value, 4),
+          "<br>Proxy: ", Proxy_name
+        ),
+        paste0(
+          "Stock: ", StockKeyLabel,
+          "<br>Year: ", Year,
+          "<br>", MetricLabel, ": ", signif(Value, 4)
+        )
+      )
+    )
+
+  stocks_top <- unique(dplyr::filter(df2, Metric == "F_FMSY")$StockKeyLabel)
+  stocks_bottom <- unique(dplyr::filter(df2, Metric == "SSB_MSYBtrigger")$StockKeyLabel)
+  only_bottom <- setdiff(stocks_bottom, stocks_top)
+
+  ct_group <- rand_id()
+
+  plot1 <- make_single_guild_panel(
+    df2 = df2,
+    mean_df = mean_df,
+    df_all_years = df,
+    metric_raw = "F_FMSY",
+    yaxis_title = metric_map[["F_FMSY"]],
+    legend_stocks = stocks_top,
+    values = values,
+    ct_group = ct_group,
+    show_mean_in_legend = TRUE
+  )
+
+  plot2 <- make_single_guild_panel(
+    df2 = df2,
+    mean_df = mean_df,
+    df_all_years = df,
+    metric_raw = "SSB_MSYBtrigger",
+    yaxis_title = metric_map[["SSB_MSYBtrigger"]],
+    legend_stocks = only_bottom,
+    values = values,
+    ct_group = ct_group,
+    show_mean_in_legend = FALSE
+  )
+
+  final_plot <- build_final_plot(
+    plot1 = plot1,
+    plot2 = plot2,
+    title_text = paste0("Status trends: ", guild, " (", ecoregion, ")"),
+    legend_title = "<b>Stock code:</b>",
+    filename_stub = paste0(
+      ecoregion, "_StatusTrends_", guild, "_",
+      base::format(base::Sys.Date(), "%d-%b-%y")
+    ),
+    per_panel_height = per_panel_height
+  ) %>%
+    plotly::highlight(
+      on = "plotly_click",
+      off = "plotly_doubleclick",
+      color = NULL,
+      opacityDim = 0.3,
+      selected = plotly::attrs_selected(
+        opacity = 1,
+        line = list(width = 6)
+      )
+    )
+
+  if (return_data) df else final_plot
+}
+
+
+
+
+
+
+#' Build final two-panel Plotly layout
+#'
+#' Combines two Plotly panels into a vertically stacked subplot and applies
+#' shared layout elements (axes, legend, annotations, export options).
+#'
+#' @param plot1 A Plotly object representing the upper panel (typically F/F_MSY).
+#' @param plot2 A Plotly object representing the lower panel (typically SSB/Btrigger).
+#' @param title_text Character string. Title annotation shown at the top-left of the figure.
+#' @param legend_title Character string. Title displayed above the legend.
+#' @param filename_stub Character string. Base filename used when exporting the plot as an image.
+#'
+#' @details
+#' This helper standardizes figure appearance across use cases:
+#' \itemize{
+#'   \item Stacks panels with shared x-axis (Year)
+#'   \item Applies consistent font sizes and margins
+#'   \item Adds a data source annotation (ICES)
+#'   \item Adds a contextual title annotation
+#'   \item Configures export settings (PNG, high resolution)
+#' }
+#'
+#' Saved HTML fills its browser or iframe viewport. The fallback height is
+#' twice \code{per_panel_height} when the display does not supply a height.
+#'
+#' @return A Plotly object with combined panels and configured layout.
+build_final_plot <- function(plot1, plot2, title_text, legend_title, filename_stub, per_panel_height = 330) {
+  plot <- plotly::subplot(plot1, plot2, nrows = 2, shareX = TRUE, titleY = TRUE) %>%
+    plotly::layout(
+      autosize = TRUE,
+      xaxis = list(
+        title = "Year",
+        titlefont = list(size = 16),
+        tickfont = list(size = 14)
+      ),
+      margin = list(b = 100, r = 50),
+      legend = list(
+        title = list(text = legend_title, font = list(size = 16)),
+        orientation = "h",
+        x = 0.5, y = 1.05, xanchor = "center", yanchor = "bottom",
+        font = list(size = 16)
+      ),
+      annotations = list(
+        list(
+          x = 1, y = 0, yshift = -65, xref = "paper", yref = "paper",
+          text = paste0(
+            "ICES Stock Assessment Database, ",
+            base::format(base::Sys.Date(), "%d-%b-%y"),
+            ". ICES, Copenhagen"
+          ),
+          showarrow = FALSE,
+          xanchor = "right",
+          yanchor = "top",
+          font = list(size = 12)
+        ),
+        list(
+          text = title_text,
+          x = 0.01, y = 0.99, xref = "paper", yref = "paper",
+          showarrow = FALSE,
+          xanchor = "left",
+          yanchor = "top",
+          font = list(size = 18, color = "black")
+        )
+      )
+    ) %>%
+    plotly::config(
+      responsive = TRUE,
+      toImageButtonOptions = list(
+        filename = filename_stub,
+        format   = "png",
+        scale    = 3
+      )
+    )
+
+  plot$width <- NULL
+  plot$height <- NULL
+  plot$sizingPolicy <- htmlwidgets::sizingPolicy(
+    defaultWidth = "100%",
+    defaultHeight = per_panel_height * 2,
+    padding = 0,
+    browser.fill = TRUE,
+    viewer.fill = TRUE
+  )
+  plot
+}
+
+#' Create panel for "All guilds" view (mean lines only)
+#'
+#' Generates a single Plotly panel showing one line per fisheries guild,
+#' using pre-computed mean values (StockKeyLabel == "Mean").
+#'
+#' @param df_mean Data frame containing mean time series for each guild.
+#'   Must include columns: \code{Year}, \code{Value}, \code{Metric}, \code{FisheriesGuild}.
+#' @param metric_raw Character string. Metric identifier (e.g. "F_FMSY", "SSB_MSYBtrigger").
+#' @param yaxis_title Character string. Label for the y-axis (HTML allowed).
+#' @param colors Named character vector mapping \code{FisheriesGuild} to colors.
+#' @param showlegend Logical. Whether to display legend entries for this panel.
+#'
+#' @details
+#' This helper is used when \code{guild == "All"}:
+#' \itemize{
+#'   \item Only mean series are plotted (no individual stocks)
+#'   \item Each guild is represented as one line
+#'   \item Lines are grouped and colored by \code{FisheriesGuild}
+#'   \item A horizontal reference line at y = 1 is added
+#'   \item A bounding box frame is drawn around the panel
+#' }
+#'
+#' Hover text includes guild, year, and metric value.
+#'
+#' @return A Plotly object representing a single panel.
+make_all_guilds_panel <- function(df_mean, metric_raw, yaxis_title, colors, showlegend = TRUE) {
+  panel <- df_mean %>%
+    dplyr::filter(Metric == metric_raw)
+
+  plotly::plot_ly() %>%
+    plotly::add_lines(
+      data = panel,
+      x = ~Year, y = ~Value,
+      split = ~FisheriesGuild,
+      color = ~FisheriesGuild,
+      colors = colors,
+      legendgroup = ~FisheriesGuild,
+      name = ~FisheriesGuild,
+      line = list(width = 3),
+      text = ~ paste0(
+        "Guild: ", FisheriesGuild,
+        "<br>Year: ", Year,
+        "<br>", yaxis_title, ": ", base::signif(Value, 4)
+      ),
+      hovertemplate = "%{text}<extra></extra>",
+      showlegend = showlegend
+    ) %>%
+    plotly::layout(
+      yaxis = list(
+        title = yaxis_title,
+        titlefont = list(size = 16),
+        tickfont = list(size = 14),
+        zeroline = TRUE,
+        zerolinecolor = "black",
+        zerolinewidth = 2
+      ),
+      shapes = list(
+        list(
+          type = "line",
+          x0 = min(df_mean$Year, na.rm = TRUE),
+          x1 = max(df_mean$Year, na.rm = TRUE) + 1,
+          y0 = 1, y1 = 1,
+          line = list(color = "#000000", width = 1)
+        ),
+        list(
+          type = "rect", xref = "paper", yref = "paper",
+          x0 = 0, x1 = 1, y0 = 0, y1 = 1,
+          line = list(color = "black", width = 1),
+          fillcolor = "rgba(0,0,0,0)"
+        )
+      )
+    )
+}
+
+#' Create panel for a single guild (stock-level lines + mean)
+#'
+#' Generates a Plotly panel for a selected fisheries guild, showing:
+#' individual stock trajectories and the guild-level mean.
+#'
+#' @param df2 Data frame of non-mean stock observations.
+#'   Must include: \code{Year}, \code{Value}, \code{Metric}, \code{StockKeyLabel},
+#'   \code{Proxy_is_proxy}, \code{hover}.
+#' @param mean_df Data frame containing mean time series (StockKeyLabel == "Mean").
+#' @param df_all_years Data frame used only to determine x-axis range (Year).
+#' @param metric_raw Character string. Metric identifier.
+#' @param yaxis_title Character string. Label for the y-axis.
+#' @param legend_stocks Character vector of stock IDs to include in the legend.
+#'   Other stocks are plotted but hidden from the legend.
+#' @param values Named character vector mapping stock IDs to colors.
+#' @param ct_group Character string. Crosstalk group ID for linked highlighting.
+#' @param show_mean_in_legend Logical. Whether to include the mean line in the legend.
+#'
+#' @details
+#' This helper implements the main plotting logic for individual guilds:
+#' \itemize{
+#'   \item Splits stocks into proxy vs non-proxy:
+#'     \itemize{
+#'       \item Solid lines = observed data
+#'       \item Dotted lines = proxy-based data
+#'     }
+#'   \item Separates legend-visible and legend-hidden traces
+#'   \item Uses \code{highlight_key()} to enable cross-panel interaction
+#'   \item Applies dimming for unselected traces
+#'   \item Adds a thick black mean line
+#'   \item Adds reference line at y = 1 and panel border
+#' }
+#'
+#' The function assumes that proxy status is constant within each stock time series.
+#'
+#' @return A Plotly object representing a single panel.
+make_single_guild_panel <- function(df2, mean_df, df_all_years, metric_raw, yaxis_title,
+                                    legend_stocks, values, ct_group, show_mean_in_legend = TRUE) {
+  panel <- dplyr::filter(df2, Metric == metric_raw)
+
+  np <- panel %>%
+    dplyr::group_by(StockKeyLabel) %>%
+    dplyr::filter(!base::any(Proxy_is_proxy, na.rm = TRUE)) %>%
+    dplyr::ungroup()
+
+  pr <- panel %>%
+    dplyr::group_by(StockKeyLabel) %>%
+    dplyr::filter(base::any(Proxy_is_proxy, na.rm = TRUE)) %>%
+    dplyr::ungroup()
+
+  np_on <- dplyr::filter(np, StockKeyLabel %in% legend_stocks)
+  np_off <- dplyr::filter(np, !StockKeyLabel %in% legend_stocks)
+  pr_on <- dplyr::filter(pr, StockKeyLabel %in% legend_stocks)
+  pr_off <- dplyr::filter(pr, !StockKeyLabel %in% legend_stocks)
+
+  hk_np_on <- plotly::highlight_key(np_on, ~StockKeyLabel, group = ct_group)
+  hk_np_off <- plotly::highlight_key(np_off, ~StockKeyLabel, group = ct_group)
+  hk_pr_on <- plotly::highlight_key(pr_on, ~StockKeyLabel, group = ct_group)
+  hk_pr_off <- plotly::highlight_key(pr_off, ~StockKeyLabel, group = ct_group)
+
+  plotly::plot_ly() %>%
+    plotly::add_lines(
+      data = hk_np_on,
+      x = ~Year, y = ~Value,
+      split = ~StockKeyLabel,
+      color = ~StockKeyLabel, colors = values,
+      legendgroup = ~StockKeyLabel, name = ~StockKeyLabel,
+      line = list(width = 3, dash = "solid"),
+      unselected = list(line = list(opacity = 0.3)),
+      text = ~hover, hovertemplate = "%{text}<extra></extra>",
+      showlegend = TRUE
+    ) %>%
+    plotly::add_lines(
+      data = hk_np_off,
+      x = ~Year, y = ~Value,
+      split = ~StockKeyLabel,
+      color = ~StockKeyLabel, colors = values,
+      legendgroup = ~StockKeyLabel, name = ~StockKeyLabel,
+      line = list(width = 3, dash = "solid"),
+      unselected = list(line = list(opacity = 0.3)),
+      text = ~hover, hovertemplate = "%{text}<extra></extra>",
+      showlegend = FALSE
+    ) %>%
+    plotly::add_lines(
+      data = hk_pr_on,
+      x = ~Year, y = ~Value,
+      split = ~StockKeyLabel,
+      color = ~StockKeyLabel, colors = values,
+      legendgroup = ~StockKeyLabel, name = ~StockKeyLabel,
+      line = list(width = 3, dash = "dot"),
+      unselected = list(line = list(opacity = 0.3)),
+      text = ~hover, hovertemplate = "%{text}<extra></extra>",
+      showlegend = TRUE
+    ) %>%
+    plotly::add_lines(
+      data = hk_pr_off,
+      x = ~Year, y = ~Value,
+      split = ~StockKeyLabel,
+      color = ~StockKeyLabel, colors = values,
+      legendgroup = ~StockKeyLabel, name = ~StockKeyLabel,
+      line = list(width = 3, dash = "dot"),
+      unselected = list(line = list(opacity = 0.3)),
+      text = ~hover, hovertemplate = "%{text}<extra></extra>",
+      showlegend = FALSE
+    ) %>%
+    plotly::add_lines(
+      data = dplyr::filter(mean_df, Metric == metric_raw),
+      x = ~Year, y = ~Value,
+      name = "Mean", legendgroup = "Mean",
+      line = list(color = "black", width = 5),
+      showlegend = show_mean_in_legend,
+      inherit = FALSE
+    ) %>%
+    plotly::layout(
+      yaxis = list(
+        title = yaxis_title,
+        titlefont = list(size = 16),
+        tickfont = list(size = 14),
+        zeroline = TRUE, zerolinecolor = "black", zerolinewidth = 2
+      ),
+      shapes = list(
+        list(
+          type = "line",
+          x0 = min(df_all_years$Year, na.rm = TRUE),
+          x1 = max(df_all_years$Year, na.rm = TRUE) + 1,
+          y0 = 1, y1 = 1,
+          line = list(color = "#000000", width = 1)
+        ),
+        list(
+          type = "rect", xref = "paper", yref = "paper",
+          x0 = 0, x1 = 1, y0 = 0, y1 = 1,
+          line = list(color = "black", width = 1),
+          fillcolor = "rgba(0,0,0,0)"
+        )
+      )
+    )
+}

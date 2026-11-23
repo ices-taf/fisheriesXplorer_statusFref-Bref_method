@@ -25,9 +25,16 @@ output.R                       -> output/regions/stocks_<code>.rds
                                   output/coverage_by_ecoregion.csv
                                   output/conflicting_stocks.csv
 
-report.R                       -> report/reference_point_summary.md
+report_1_summary.R             -> report/reference_point_summary.md
                                   report/stock_status_coverage.csv
-                                  report/status_pies/status_pies_<code>.html (optional)
+report_2_plotting.R             -> report/html_plots/stock_summary__<code>.html (optional)
+                                  report/html_plots/ges__<code>.html (optional)
+                                  report/html_plots/discards__<code>.html (optional)
+                                  report/html_plots/kobe__<code>__<guild>.html (optional)
+                                  report/html_plots/status_trends__<code>__<guild>.html (optional)
+                                  report/html_plots/lib/ (shared dependencies)
+                                  report/html_plots/plot_index.csv
+                                  report/html_plots/plot_export_report.csv
 ```
 
 The **boot** scripts are executed by `taf.boot()` in their own `boot/data/<script_name>/` working directories, exactly as in your repo. Each script now retrieves all configured ecoregions (SAG and settings: one request per region; SID: one active-year download, then region splitting). They write the *same named files* your `DATA.bib` expects, but with a `TAF_Ecoregion` column to separate stock/assessment records. `data.R` reads those files and removes `TAF_Ecoregion` before calling your existing `format_sag()`. No subsequent stage performs API requests.
@@ -37,7 +44,7 @@ The **boot** scripts are executed by `taf.boot()` in their own `boot/data/<scrip
 Extract this patch over a copy/branch of the existing repo, retaining the relative paths. The patch includes:
 
 - `boot/getSAG.R`, `boot/getSAGsettings.R`, `boot/getSID.R`, `boot/DATA.bib`
-- `all_regions_config.R`, `data.R`, `model.R`, `output.R`, `report.R`
+- `all_regions_config.R`, `data.R`, `model.R`, `output.R`, `report.R`, `report_1_summary.R`, `report_2_plotting.R`
 - `config/manual_reference_overrides.csv` and `run_all_ecoregions.R`
 
 Install dependencies already used by your repository (`icesTAF`, `dplyr`, `tidyr`, `tibble`, `jsonlite`); optionally `plotly` and `htmlwidgets` for the report HTML. `utilities.R` in your repository already provides `audit_sag_reference_points`, `make_sag_refpoint_policy`, `read_sag_review_policy_v3`, `add_proxyRefPoints_v3`, `stockstatus_CLD_current_proxy`, and the provenance helper. `utilities_plotting.R` is unchanged.
@@ -49,6 +56,17 @@ source("run_all_ecoregions.R")
 ```
 
 Alternatively run `taf.boot(force = TRUE)` and then source `data.R`, `model.R`, `output.R`, and `report.R` in order. To reuse boot data without fetching anew, start at `source("data.R")`. The default SID active year is **2026**; set `ICES_ASSESSMENT_YEAR` in the environment before running boot to override. If you change the year, review the year metadata in `boot/DATA.bib` accordingly.
+
+`report.R` runs both report stages. To run either stage independently from the repository root using existing output data:
+
+```r
+source("report_1_summary.R")
+source("report_2_plotting.R")
+```
+
+Plot HTML files are exported with `selfcontained = FALSE` and share the sibling `lib/` directory. Keep the entire `report/html_plots/` directory together when copying or publishing plots; HTML files alone are not portable. Existing files in the former `report/status_pies/` and `report/discard_trends/` directories are not updated or removed.
+
+`plot_index.csv` maps successfully exported selections to HTML basenames using `plot_type`, `ecoregion_id`, `guild_id`, and `file`. Ecoregion IDs use the existing acronyms; `guild_id` is empty for pies and discard trends. Kobe exports use the five guild IDs `benthic`, `demersal`, `elasmobranch`, `pelagic`, and `shellfish`, plus `all_stocks` for an unfiltered view across all guilds, retaining the existing plotting function's defaults. The combined view is saved as `kobe__<code>__all_stocks.html`. Status trends use the same five guild IDs plus `all_guilds`, prepared from annual ratios with arithmetic guild/year means; the combined view shows guild means, while individual guild views include stock trajectories. `plot_export_report.csv` records all 165 expected selections (33 regional plots, 66 Kobe plots, and 66 status-trend plots), with `status` (`exported`, `no_data`, or `failed`) and a `reason`. Absent guilds and other known no-data cases are recorded explicitly and omitted from the selection index. Both CSVs are updated after each export; a previous HTML for an attempted selection is removed before regeneration so a stale file cannot appear successful. Duplicate selection keys or filenames are rejected, and unexpected export errors cause the run to fail after recording the outcomes. Plotting packages remain optional for the summary, but missing dependencies now count as failures when running the plotting stage.
 
 ## Reference-point policy
 
