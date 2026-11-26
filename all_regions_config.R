@@ -15,6 +15,9 @@ if (length(assessment_year) != 1L || !is.finite(assessment_year)) {
 # This is a provisional policy until independently verified for each stock.
 excluded_standard_fields <- c("Blim")
 
+# Exclusions matched against reference-point names.
+excluded_reference_names <- c("Iloss")
+
 # Optional approved master policy: prior decisions carry over on exact matches.
 previous_policy <- "config/SAG_reference_point_policy_approved.csv"
 if (!file.exists(previous_policy)) previous_policy <- NULL

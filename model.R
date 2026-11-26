@@ -275,6 +275,18 @@ for (i in seq_along(ecoregions)) {
   policy$source_issue_note[issue_gfb] <-
     "Source SAG reference-point name missing; provisionally approved"
 
+  # Apply reference-name exclusions after all manual mappings.
+  # Normalisation treats Iloss, I_loss and I_{loss} as the same name.
+  excluded_by_name <-
+    gsub("[^a-z0-9]", "", tolower(clean(policy$reference_name))) %in%
+    gsub("[^a-z0-9]", "", tolower(clean(excluded_reference_names)))
+
+  policy$review_decision[excluded_by_name] <- "EXCLUDE"
+  policy$matches_numerator[excluded_by_name] <- "NO"
+  policy$evidence_notes[excluded_by_name] <-
+    "Excluded by configured reference-name policy"
+
+
   approved_path <- file.path("model/policies",
                              paste0("SAG_policy_", code, "_approved.csv"))
   utils::write.csv(policy, approved_path, row.names = FALSE, na = "")
